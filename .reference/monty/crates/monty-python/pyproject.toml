@@ -47,7 +47,7 @@ exclude = ["python/pydantic_monty/*.so", "python/pydantic_monty/__pycache__/**"]
 
 [dependency-groups]
 dev = [
-    "anyio>=4.0",
+    "anyio>=4.14.2",
     "black>=25.12.0",
     "dirty-equals>=0.11",
     "inline-snapshot>=0.31.1",
