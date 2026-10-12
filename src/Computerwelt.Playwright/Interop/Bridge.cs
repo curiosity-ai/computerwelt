@@ -157,6 +157,33 @@ internal sealed class Bridge
         return bytes;
     }
 
+    /// <summary>
+    /// Tells the host about a screenshot or PDF the script took, through
+    /// <see cref="PlaywrightScopeOptions.OnCapture"/>.
+    /// </summary>
+    public void Captured(PlaywrightCaptureKind kind, byte[] bytes, string? path, string? pageUrl)
+    {
+        if (Scope.Options.OnCapture is not { } onCapture)
+        {
+            return;
+        }
+
+        var contentType = kind == PlaywrightCaptureKind.Pdf ? "application/pdf" : PlaywrightCapture.ImageType(bytes);
+
+        try
+        {
+            onCapture(new PlaywrightCapture(kind, bytes, contentType, path is null ? null : Absolute(path), pageUrl));
+        }
+#pragma warning disable CA1031 // The host's bookkeeping failing is not the script's error, and no host exception may reach it.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+    }
+
+    private string Absolute(string path) =>
+        path.StartsWith('/') ? path : Context.WorkingDirectory.TrimEnd('/') + "/" + path;
+
     /// <summary>Reads a file from the sandbox as UTF-8 text.</summary>
     public string ReadText(string path) => Encoding.UTF8.GetString(Read(path));
 

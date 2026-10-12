@@ -842,6 +842,6 @@ inside a script: host code is registered by the host, before the session is buil
 | `Computerwelt.Emulation.Bash.Tests/ExtensibilityTests` | 22 — dispatch, override, withholding, resolver ordering, budget charging, the context helpers, two sessions sharing one command |
 | `Computerwelt.Emulation.Python.Tests/ExtensibilityTests` | 27 — host and source libraries, host functions over a filesystem, per-run freshness, laziness, cycles, a library that will not compile, limits |
 | `Computerwelt.Tests/ExtensibilityTests` | 12 — a host command, a host library and a host function over one filesystem |
-| `Computerwelt.Playwright.Tests` | 56 — the navigation policy on its own, 22 browser scenarios written as Python, 5 on what happens to a context when the script that opened it stops caring, 10 on scopes, resolvers and the installer, and 6 on the Landlock sandbox |
+| `Computerwelt.Playwright.Tests` | 57 — the navigation policy on its own, 22 browser scenarios written as Python, 5 on what happens to a context when the script that opened it stops caring, 11 on scopes, resolvers, captures and the installer, and 6 on the Landlock sandbox |
 
 `samples/Computerwelt.Sample.Extensibility/` is every point in one runnable program.

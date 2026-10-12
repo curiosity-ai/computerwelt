@@ -73,6 +73,9 @@ foreach (var page in scope.Pages)                          // what the tenant ha
 }
 ```
 
+`OnCapture` hands the host every screenshot and PDF a tenant's scripts take, with or without a
+`path=` — for a host that keeps them with a conversation or shows them to a person.
+
 A sandbox built once whose browser may come and go later registers a resolver instead —
 `WithPlaywright(() => current ?? throw new PlaywrightUnavailableException("the browser is off"))`
 — which is asked on each run's first `import playwright`; what it throws becomes the program's

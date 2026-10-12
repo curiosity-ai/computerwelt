@@ -105,6 +105,53 @@ public sealed class ScopeTests
     }
 
     [Fact]
+    public async Task The_host_is_told_about_every_screenshot_and_pdf_a_script_takes()
+    {
+        if (Skipped)
+        {
+            return;
+        }
+
+        var captures = new List<PlaywrightCapture>();
+
+        await using var scope = Session().CreateScope(new PlaywrightScopeOptions
+        {
+            OnCapture = capture => captures.Add(capture),
+        });
+
+        var bash = Bash.CreateBuilder().WithWorkingDirectory("/").WithPlaywright(scope).Build();
+
+        await bash.FileSystem.WriteFileAsync(VPath.Parse("/run.py"), Encoding.UTF8.GetBytes("""
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                page = p.chromium.launch().new_page()
+                page.goto('data:text/html,<h1 id="t">hi</h1>')
+                page.screenshot(path='shot.png')
+                page.locator('#t').screenshot(type='jpeg')
+                page.pdf()
+            """));
+
+        //A relative path is the run's, so the host is told where it landed, not what was typed.
+        var result = await bash.ExecAsync("mkdir -p /work && cd /work && python /run.py");
+
+        Assert.True(result.ExitCode == 0, result.Stderr.ToString());
+        Assert.Equal(3, captures.Count);
+
+        Assert.Equal(PlaywrightCaptureKind.Screenshot, captures[0].Kind);
+        Assert.Equal("image/png", captures[0].ContentType);
+        Assert.Equal("/work/shot.png", captures[0].Path);
+        Assert.StartsWith("data:text/html", captures[0].PageUrl, StringComparison.Ordinal);
+
+        Assert.Equal("image/jpeg", captures[1].ContentType);
+        Assert.Null(captures[1].Path);
+
+        Assert.Equal(PlaywrightCaptureKind.Pdf, captures[2].Kind);
+        Assert.Equal("application/pdf", captures[2].ContentType);
+        Assert.True(captures[2].Content.Length > 0);
+    }
+
+    [Fact]
     public async Task A_scopes_own_cap_is_enforced_below_the_sessions()
     {
         if (Skipped)

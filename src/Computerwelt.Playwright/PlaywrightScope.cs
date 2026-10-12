@@ -38,6 +38,47 @@ public sealed record PlaywrightScopeOptions
     /// A failure here fails the script's <c>new_context()</c>.
     /// </remarks>
     public Func<IBrowserContext, CancellationToken, Task>? ConfigureContext { get; init; }
+
+    /// <summary>
+    /// Host code told about every screenshot and PDF one of this tenant's scripts takes, with or
+    /// without a <c>path=</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bytes already went to the script and, when it named a path, into the sandbox's
+    /// filesystem; this is for a host that also wants to keep them outside the run - attach them to
+    /// a conversation, show them to a person - which a script cannot do by itself.
+    /// </para>
+    /// <para>
+    /// Called on the interpreter's thread, synchronously, so keep it short: queue the work. An
+    /// exception it throws is swallowed rather than handed to the script, because the script did
+    /// nothing wrong.
+    /// </para>
+    /// </remarks>
+    public Action<PlaywrightCapture>? OnCapture { get; init; }
+}
+
+/// <summary>What a capture was.</summary>
+public enum PlaywrightCaptureKind
+{
+    /// <summary>A screenshot of a page or of an element.</summary>
+    Screenshot,
+
+    /// <summary>A page printed to PDF.</summary>
+    Pdf,
+}
+
+/// <summary>One screenshot or PDF a script took.</summary>
+/// <param name="Kind">Screenshot or PDF.</param>
+/// <param name="Content">The bytes the script got.</param>
+/// <param name="ContentType"><c>image/png</c>, <c>image/jpeg</c> or <c>application/pdf</c>.</param>
+/// <param name="Path">The virtual path the script wrote it to, or null when it only kept the bytes.</param>
+/// <param name="PageUrl">The address of the page it was taken from.</param>
+public sealed record PlaywrightCapture(PlaywrightCaptureKind Kind, byte[] Content, string ContentType, string? Path, string? PageUrl)
+{
+    /// <summary>The content type of a screenshot, read from its bytes - the driver writes PNG unless asked for JPEG.</summary>
+    internal static string ImageType(byte[] bytes) =>
+        bytes.Length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 ? "image/jpeg" : "image/png";
 }
 
 /// <summary>

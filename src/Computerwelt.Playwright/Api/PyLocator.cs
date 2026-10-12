@@ -388,6 +388,8 @@ internal sealed class PyLocator : PlaywrightObject
                 Bridge.Write(path, bytes);
             }
 
+            Bridge.Captured(PlaywrightCaptureKind.Screenshot, bytes, path, Locator.Page.Url);
+
             return new PyBytes(bytes);
         }),
 
