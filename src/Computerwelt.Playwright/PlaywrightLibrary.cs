@@ -34,7 +34,7 @@ public sealed class PlaywrightLibrary
     // And one module object per run, so that the name reached through the package and the
     // name imported directly are the same object — as they are in CPython.
     private readonly ConditionalWeakTable<VirtualMachine, PyObject> _modules = [];
-    private readonly Func<PlaywrightScope> _scope;
+    private readonly Func<CancellationToken, Task<PlaywrightScope>> _scope;
     private readonly CancellationToken _cancellationToken;
 
     /// <summary>Builds the library over a host-owned browser session.</summary>
@@ -48,7 +48,7 @@ public sealed class PlaywrightLibrary
     {
         ArgumentNullException.ThrowIfNull(session);
 
-        _scope = () => session.DefaultScope;
+        _scope = _ => Task.FromResult(session.DefaultScope);
         _cancellationToken = cancellationToken;
     }
 
@@ -59,7 +59,7 @@ public sealed class PlaywrightLibrary
     {
         ArgumentNullException.ThrowIfNull(scope);
 
-        _scope = () => scope;
+        _scope = _ => Task.FromResult(scope);
         _cancellationToken = cancellationToken;
     }
 
@@ -83,6 +83,23 @@ public sealed class PlaywrightLibrary
     /// <param name="scope">Answers the scope for the run that is importing.</param>
     /// <param name="cancellationToken">Stops further driver calls once it is cancelled.</param>
     public PlaywrightLibrary(Func<PlaywrightScope> scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+
+        _scope = _ => Task.FromResult(scope());
+        _cancellationToken = cancellationToken;
+    }
+
+    /// <summary>
+    /// Builds the library over a scope the host resolves asynchronously at import time, once per
+    /// run — for a host whose browser has to be started, or a scope created, before it can answer.
+    /// </summary>
+    /// <remarks>
+    /// The import is a synchronous call in the interpreter, so the resolver is waited for there,
+    /// on the thread pool, the same way every driver call is (see the remarks on the bridge). The
+    /// token is the library's own cancellation token.
+    /// </remarks>
+    public PlaywrightLibrary(Func<CancellationToken, Task<PlaywrightScope>> scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
 
@@ -120,13 +137,21 @@ public sealed class PlaywrightLibrary
         CancellationToken cancellationToken = default) =>
         new PlaywrightLibrary(scope, cancellationToken).Modules;
 
+    /// <summary>The modules to register over a scope resolved asynchronously per run.</summary>
+    public static IReadOnlyList<PythonLibrary> For(
+        Func<CancellationToken, Task<PlaywrightScope>> scope,
+        CancellationToken cancellationToken = default) =>
+        new PlaywrightLibrary(scope, cancellationToken).Modules;
+
     private PlaywrightScope ResolveScope()
     {
         PlaywrightScope scope;
 
         try
         {
-            scope = _scope();
+            // The interpreter is synchronous, so the wait happens here, once, on the thread pool -
+            // the same boundary every driver call crosses in Bridge.Block.
+            scope = Task.Run(() => _scope(_cancellationToken), _cancellationToken).GetAwaiter().GetResult();
         }
         catch (Exception exception)
         {

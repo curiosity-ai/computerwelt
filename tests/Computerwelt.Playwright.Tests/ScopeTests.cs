@@ -220,6 +220,45 @@ public sealed class ScopeTests
     }
 
     [Fact]
+    public async Task An_async_resolver_is_awaited_and_its_refusal_reported()
+    {
+        if (Skipped)
+        {
+            return;
+        }
+
+        await using var scope = Session().CreateScope();
+        var open = false;
+
+        var options = new PythonOptions().WithPlaywright(async ct =>
+        {
+            await Task.Delay(10, ct);
+            return open ? scope : throw new PlaywrightUnavailableException("every browser session is in use");
+        });
+
+        var bash = Bash.CreateBuilder().WithWorkingDirectory("/").WithPython(options).Build();
+
+        const string Program = """
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    page = p.chromium.launch().new_page()
+                    page.set_content('<h1>async</h1>')
+                    print(page.text_content('h1'))
+            except ImportError as e:
+                print(str(e))
+            """;
+
+        Assert.Equal("playwright is not available: every browser session is in use\n", (await RunAsync(bash, Program)).Stdout.ToString());
+
+        open = true;
+        var result = await RunAsync(bash, Program);
+
+        Assert.True(result.ExitCode == 0, result.Stderr.ToString());
+        Assert.Equal("async\n", result.Stdout.ToString());
+    }
+
+    [Fact]
     public async Task The_installer_reports_the_browser_the_fixture_launched_as_installed()
     {
         if (Skipped)

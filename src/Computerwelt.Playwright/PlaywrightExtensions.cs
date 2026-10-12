@@ -143,6 +143,24 @@ public static class PlaywrightExtensions
     }
 
     /// <summary>
+    /// Returns options whose <c>python</c> command can import <c>playwright</c> over a scope the
+    /// host resolves asynchronously at import time.
+    /// </summary>
+    public static PythonOptions WithPlaywright(
+        this PythonOptions options,
+        Func<CancellationToken, Task<PlaywrightScope>> scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return options with
+        {
+            Libraries = [.. options.Libraries, .. PlaywrightLibrary.For(scope, cancellationToken)],
+        };
+    }
+
+    /// <summary>
     /// Builds a shell whose <c>python</c> command drives the browser through a scope the host
     /// resolves each time a program imports <c>playwright</c>.
     /// </summary>
