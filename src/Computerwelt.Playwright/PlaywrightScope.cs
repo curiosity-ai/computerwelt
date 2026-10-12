@@ -56,6 +56,33 @@ public sealed record PlaywrightScopeOptions
     /// </para>
     /// </remarks>
     public Action<PlaywrightCapture>? OnCapture { get; init; }
+
+    /// <summary>
+    /// A directory this tenant's browser profiles live in, or null to open its contexts on the
+    /// session's shared browser.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Set, every context the tenant opens is a <i>persistent</i> context: a browser process of its
+    /// own, launched over a profile folder below this directory - <c>chromium-1</c> for the first
+    /// context open at a time, <c>chromium-2</c> for a second open beside it, and so on. The next
+    /// context to open takes the lowest folder free, so a tenant whose runs open one context each
+    /// keeps one profile: its cookies, its local storage and its cache carry over from one run to
+    /// the next, and nothing of it is in the shared browser another tenant also uses.
+    /// </para>
+    /// <para>
+    /// The price is a browser process per open context instead of one per session, and a
+    /// <c>storage_state</c> cannot be loaded into one - the profile is what carries it. The folders
+    /// outlive the scope; removing them is the host's decision.
+    /// </para>
+    /// <para>
+    /// Under a <see cref="PlaywrightOptions.Sandbox"/> the directory has to be one the browser may
+    /// write to - below <see cref="PlaywrightOptions.TemporaryDirectory"/> or one of
+    /// <see cref="PlaywrightSandboxOptions.ReadWritePaths"/> - and the ruleset is fixed when the
+    /// session starts, so <see cref="PlaywrightSession.CreateScope"/> refuses one that is not.
+    /// </para>
+    /// </remarks>
+    public string? ProfileDirectory { get; init; }
 }
 
 /// <summary>What a capture was.</summary>
@@ -106,6 +133,8 @@ public sealed record PlaywrightCapture(PlaywrightCaptureKind Kind, byte[] Conten
 public sealed class PlaywrightScope : IAsyncDisposable
 {
     private readonly List<IBrowserContext> _contexts = [];
+    private readonly Dictionary<IBrowserContext, string> _profiles = [];
+    private readonly HashSet<string> _profilesInUse = new(StringComparer.Ordinal);
     private bool _disposed;
     private long _lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 
@@ -116,7 +145,25 @@ public sealed class PlaywrightScope : IAsyncDisposable
         Policy = options.AllowedHosts is null
             ? session.Policy
             : new NavigationPolicy(session.Options with { AllowedHosts = options.AllowedHosts });
+
+        if (options.ProfileDirectory is { } profiles)
+        {
+            ProfileDirectory = Path.GetFullPath(profiles);
+
+            if (session.SandboxStatus.FileSystemConfined && !session.WritablePaths.Any(root => IsBeneath(ProfileDirectory, root)))
+            {
+                throw new ArgumentException(
+                    $"the browser cannot write to '{ProfileDirectory}': the session's Landlock sandbox only lets it write to "
+                    + $"[{string.Join(", ", session.WritablePaths)}]. Put PlaywrightScopeOptions.ProfileDirectory below "
+                    + "PlaywrightOptions.TemporaryDirectory or one of PlaywrightSandboxOptions.ReadWritePaths - which "
+                    + "has to exist when the session starts.",
+                    nameof(options));
+            }
+        }
     }
+
+    /// <summary>The full path of <see cref="PlaywrightScopeOptions.ProfileDirectory"/>, or null when contexts use the shared browser.</summary>
+    public string? ProfileDirectory { get; }
 
     /// <summary>The shared session this scope borrows from.</summary>
     public PlaywrightSession Session { get; }
@@ -165,12 +212,44 @@ public sealed class PlaywrightScope : IAsyncDisposable
     /// Opens a context for this tenant, under the session's caps, this scope's cap and this
     /// scope's navigation policy.
     /// </summary>
-    public async Task<IBrowserContext> NewContextAsync(
+    /// <remarks>
+    /// With a <see cref="PlaywrightScopeOptions.ProfileDirectory"/>, <paramref name="browser"/> only
+    /// names the browser type: the context is launched over one of the tenant's profiles instead.
+    /// </remarks>
+    public Task<IBrowserContext> NewContextAsync(
         IBrowser browser,
         BrowserNewContextOptions options,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(browser);
+
+        return OpenAsync(browser.BrowserType.Name, browser, options, cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens a context for this tenant in the browser of that name - the session's shared one, or
+    /// one launched over a profile when the scope has a <see cref="PlaywrightScopeOptions.ProfileDirectory"/>.
+    /// </summary>
+    public Task<IBrowserContext> NewContextAsync(
+        string browserName,
+        BrowserNewContextOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(browserName);
+
+        return OpenAsync(browserName, null, options, cancellationToken);
+    }
+
+    private async Task<IBrowserContext> OpenAsync(
+        string browserName,
+        IBrowser? browser,
+        BrowserNewContextOptions options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(options);
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        string? profile = null;
 
         lock (_contexts)
         {
@@ -180,9 +259,43 @@ public sealed class PlaywrightScope : IAsyncDisposable
                     $"this sandbox already has {_contexts.Count} browser contexts open, which is "
                     + "its PlaywrightScopeOptions.MaxContexts. Close one, or raise the cap.");
             }
+
+            if (ProfileDirectory is { } root)
+            {
+                // Claimed before the launch, so two contexts opening at once never get one folder.
+                profile = FreeProfile(root, browserName);
+                _profilesInUse.Add(profile);
+            }
         }
 
-        var context = await Session.NewContextAsync(browser, options, Policy, cancellationToken).ConfigureAwait(false);
+        IBrowserContext context;
+
+        try
+        {
+            context = profile is null
+                ? await Session.NewContextAsync(browser ?? await Session.GetBrowserAsync(browserName, cancellationToken).ConfigureAwait(false), options, Policy, cancellationToken).ConfigureAwait(false)
+                : await Session.NewPersistentContextAsync(browserName, profile, options, Policy, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (profile is not null)
+            {
+                lock (_contexts)
+                {
+                    _profilesInUse.Remove(profile);
+                }
+            }
+
+            throw;
+        }
+
+        if (profile is not null)
+        {
+            lock (_contexts)
+            {
+                _profiles[context] = profile;
+            }
+        }
 
         try
         {
@@ -194,7 +307,7 @@ public sealed class PlaywrightScope : IAsyncDisposable
         catch
         {
             await CloseQuietlyAsync(context).ConfigureAwait(false);
-            Session.Release(context);
+            Forget(context);
             throw;
         }
 
@@ -215,7 +328,7 @@ public sealed class PlaywrightScope : IAsyncDisposable
         if (disposedMeanwhile)
         {
             await CloseQuietlyAsync(context).ConfigureAwait(false);
-            Session.Release(context);
+            Forget(context);
             throw new ObjectDisposedException(nameof(PlaywrightScope));
         }
 
@@ -228,19 +341,51 @@ public sealed class PlaywrightScope : IAsyncDisposable
     /// <summary>Forgets a context the tenant closed, so it stops counting against either cap.</summary>
     public void Release(IBrowserContext context)
     {
+        if (Forget(context))
+        {
+            ContextClosed?.Invoke(this, context);
+        }
+    }
+
+    /// <summary>Stops counting a context and frees its profile folder; answers whether the scope had it open.</summary>
+    private bool Forget(IBrowserContext context)
+    {
         bool removed;
 
         lock (_contexts)
         {
             removed = _contexts.Remove(context);
+
+            if (_profiles.Remove(context, out var profile))
+            {
+                _profilesInUse.Remove(profile);
+            }
         }
 
         Session.Release(context);
+        return removed;
+    }
 
-        if (removed)
+    /// <summary>The lowest-numbered profile folder no open context is using. Called under the lock.</summary>
+    private string FreeProfile(string root, string browserName)
+    {
+        for (var slot = 1; ; slot++)
         {
-            ContextClosed?.Invoke(this, context);
+            var candidate = Path.Combine(root, $"{browserName}-{slot}");
+
+            if (!_profilesInUse.Contains(candidate))
+            {
+                return candidate;
+            }
         }
+    }
+
+    private static bool IsBeneath(string path, string root)
+    {
+        var trimmed = root.TrimEnd(Path.DirectorySeparatorChar);
+
+        return path.Equals(trimmed, StringComparison.Ordinal)
+            || path.StartsWith(trimmed + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private void OnContextClosed(object? sender, IBrowserContext context) => Release(context);

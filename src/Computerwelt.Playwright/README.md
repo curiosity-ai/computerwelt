@@ -76,6 +76,20 @@ foreach (var page in scope.Pages)                          // what the tenant ha
 `OnCapture` hands the host every screenshot and PDF a tenant's scripts take, with or without a
 `path=` — for a host that keeps them with a conversation or shows them to a person.
 
+A scope with a `ProfileDirectory` keeps its tenant's browser state on disk instead of in the
+shared browser: every context it opens is a persistent context — a browser process of its own —
+over a numbered folder below that directory (`chromium-1`, then `chromium-2` for a second open
+at the same time). The next context takes the lowest free folder, so a tenant opening one
+context per run keeps its cookies and local storage from run to run. It costs a browser process
+per open context, and a `storage_state` cannot be loaded into one.
+
+```csharp
+await using var scope = session.CreateScope(new PlaywrightScopeOptions
+{
+    ProfileDirectory = Path.Combine(scratch, "browser", tenantId),
+});
+```
+
 A sandbox built once whose browser may come and go later registers a resolver instead —
 `WithPlaywright(() => current ?? throw new PlaywrightUnavailableException("the browser is off"))`
 — which is asked on each run's first `import playwright`; what it throws becomes the program's
@@ -90,9 +104,10 @@ what the browser process can reach if it is ever made to ask for anything else:
 await using var session = await PlaywrightSession.CreateAsync(new PlaywrightOptions
 {
     AllowedHosts = ["*.example.com"],
+    TemporaryDirectory = "/srv/browser-scratch/temp",       // the driver's TMPDIR; /tmp is not granted
     Sandbox = new PlaywrightSandboxOptions
     {
-        ReadWritePaths = ["/srv/browser-scratch"],
+        ReadWritePaths = ["/srv/browser-scratch"],         // profiles go below here
         AllowedTcpPorts = [80, 443],                       // Landlock ABI 4+ (Linux 6.7)
         Required = true,                                   // refuse to start unconfined
     },
@@ -106,9 +121,19 @@ The driver is started from a throw-away thread confined by a
 it and the host process is never restricted. Granted by default: the system library paths
 (`/usr`, `/lib`, `/etc`, `/proc`, `/sys`, …), the application and runtime directories, the
 driver, the browsers directory, the temporary directory (where the driver creates each
-profile) and `/dev/shm`. Everything else — the host's data, its home directory, `/run` — is
+profile — `PlaywrightOptions.TemporaryDirectory` when the host set one, which then replaces the
+host's `/tmp` in the grant) and `/dev/shm`. Everything else — the host's data, its home directory, `/run` — is
 denied by the kernel. Off Linux, or on a kernel without Landlock, the session starts
 unconfined and `SandboxStatus` says why, unless `Required` is set.
+
+The ruleset is fixed when the session starts, so a scope's `ProfileDirectory` has to lie below
+a path it already grants — and that path has to exist then. `CreateScope` refuses one that does
+not, rather than handing out a browser that cannot write its profile.
+
+`TemporaryDirectory` reaches the driver without touching the host's environment: the .NET
+package's internal driver-environment table is filled for the moment the driver starts and
+emptied again. On a package version that moved it, the driver keeps the host's temporary
+directory, a sandboxed session grants that too, and `SandboxStatus.Reason` says so.
 
 ## Installing the browsers
 
@@ -176,7 +201,7 @@ sequence of each and none for a mixture, and flattening one would pick a meaning
 | `page.on(...)`, `expect_event`, `wait_for_event` | Nothing can call into the interpreter while a script is blocked in it. Use the pull-based accessors the driver records for you: `page.console_messages()`, `page.requests()`, `page.page_errors()`. |
 | `page.route(...)`, `context.route(...)` | Request filtering is the host's, and it is already installed. A script-installed handler would sit in front of it. |
 | `expose_function`, `expose_binding`, `add_locator_handler` | The same reason as events: they call back from the browser's thread. |
-| `launch_persistent_context`, `connect`, `connect_over_cdp` | A profile on the host's disk, and a browser the host did not launch. |
+| `launch_persistent_context`, `connect`, `connect_over_cdp` | A profile on the host's disk, and a browser the host did not launch. A host that wants a tenant's profile kept gives its scope a `ProfileDirectory`. |
 | `expect.set_options(...)` | The driver holds that default in a process-wide static, so one script setting it would change another tenant's assertions. Per-call `timeout=` does the same job for one caller. |
 | A callable where upstream accepts one — `wait_for_url(lambda url: …)` | It would have to run on the driver's thread while the interpreter is blocked, which is the same obstacle the event API hits. A string or a pattern covers it. |
 | Frames, workers, tracing, CDP | Not modelled. `page.frame_locator(selector)` covers reaching into an `iframe`. |

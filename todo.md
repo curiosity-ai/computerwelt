@@ -216,6 +216,16 @@ directory-only right — both are `EINVAL`, and the first version hit both. `/ru
 granted (container secrets live there); `/proc` is, safely, because Landlock also scopes
 ptrace and so a confined browser cannot read the host's `/proc/<pid>/environ`.
 
+**Where the browser writes.** `PlaywrightOptions.TemporaryDirectory` becomes the driver's
+`TMPDIR` (through the .NET package's internal driver-environment table, filled only while the
+driver starts, so the host's environment is untouched) and, under the sandbox, replaces `/tmp`
+in the grant. `PlaywrightScopeOptions.ProfileDirectory` makes a tenant's contexts persistent
+contexts — a browser process each, over numbered profile folders, the lowest free one reused —
+so its storage survives between runs and never sits in the shared browser. Options are copied
+onto the persistent-context type by name, which refuses the one it has no slot for
+(`StorageState`) instead of dropping it. A persistent context opens with a blank page, which is
+closed so a new context looks like one.
+
 Writing the port test found a bug upstream of us: the `Landlock` package's `AddPortRule` never
 passed the port to the kernel, so every port rule allowed port 0 (fixed in
 curiosity-ai/landlock-sharp#1).

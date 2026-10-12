@@ -12,21 +12,36 @@ namespace Computerwelt.Playwright.Api;
 /// browser is shared and closing it would end every other tenant's session too. That is the
 /// one place where this object deliberately does less than upstream's, and it does it
 /// loudly rather than by omission — see the package README.
+/// <para>
+/// Under a scope with a <see cref="PlaywrightScopeOptions.ProfileDirectory"/> there is no shared
+/// browser to hand back: every context is a browser of its own, launched over the tenant's
+/// profile. The object then stands for the browser type, and the shared browser is started only
+/// if a script asks what version it is.
+/// </para>
 /// </remarks>
 internal sealed class PyBrowser : PlaywrightObject
 {
-    private readonly IBrowser _browser;
+    private readonly string _name;
+    private IBrowser? _browser;
 
-    public PyBrowser(Bridge bridge, IBrowser browser) : base(bridge) => _browser = browser;
+    public PyBrowser(Bridge bridge, string name, IBrowser? browser) : base(bridge)
+    {
+        _name = name;
+        _browser = browser;
+    }
 
     public override string TypeName => "Browser";
 
-    public override string Repr() => $"<Browser type={_browser.BrowserType.Name} version={_browser.Version}>";
+    public override string Repr() => _browser is null
+        ? $"<Browser type={_name}>"
+        : $"<Browser type={_name} version={_browser.Version}>";
+
+    private IBrowser Shared() => _browser ??= Bridge.Block(() => Bridge.Session.GetBrowserAsync(_name));
 
     public override PyObject? GetAttribute(string name) => name switch
     {
-        "version" => new PyStr(_browser.Version),
-        "browser_type" => new PyBrowserType(Bridge, _browser.BrowserType.Name),
+        "version" => new PyStr(Shared().Version),
+        "browser_type" => new PyBrowserType(Bridge, _name),
 
         // The run's contexts, not the browser's: another tenant's contexts are on the same
         // browser object and are none of this script's business.
@@ -35,7 +50,7 @@ internal sealed class PyBrowser : PlaywrightObject
         "is_connected" => Method("is_connected", arguments =>
         {
             arguments.Done(0);
-            return PyBool.Of(_browser.IsConnected);
+            return PyBool.Of(_browser?.IsConnected ?? true);
         }),
 
         "new_context" => Method("new_context", arguments => NewContext(arguments)),
@@ -117,6 +132,13 @@ internal sealed class PyBrowser : PlaywrightObject
 
         if (arguments.Keyword("storage_state") is { } state)
         {
+            if (Bridge.Scope.ProfileDirectory is not null)
+            {
+                throw Errors.Fail(
+                    $"{arguments.Name}(): 'storage_state' cannot be loaded here: this sandbox's browser keeps a "
+                    + "profile of its own, which already carries cookies and storage from one run to the next.");
+            }
+
             // A path here names a file in the sandbox, so it is read through the run's
             // filesystem and handed over as text — the driver never sees a path it could
             // open on the host.
@@ -164,8 +186,10 @@ internal sealed class PyBrowser : PlaywrightObject
 
         arguments.Done(0);
 
-        var context = Bridge.Block(() => Bridge.Scope.NewContextAsync(_browser, options));
-        var wrapper = new PyBrowserContext(Bridge, context);
+        var context = Bridge.Block(() => _browser is null
+            ? Bridge.Scope.NewContextAsync(_name, options)
+            : Bridge.Scope.NewContextAsync(_browser, options));
+        var wrapper = new PyBrowserContext(Bridge, context, this);
 
         Bridge.Contexts.Add(wrapper);
         return wrapper;
@@ -199,7 +223,13 @@ internal sealed class PyBrowserContext : PlaywrightObject
     private readonly List<PyPage> _pages = [];
     private bool _closed;
 
-    public PyBrowserContext(Bridge bridge, IBrowserContext context) : base(bridge) => _context = context;
+    private readonly PyBrowser _browser;
+
+    public PyBrowserContext(Bridge bridge, IBrowserContext context, PyBrowser browser) : base(bridge)
+    {
+        _context = context;
+        _browser = browser;
+    }
 
     public override string TypeName => "BrowserContext";
 
@@ -340,8 +370,7 @@ internal sealed class PyBrowserContext : PlaywrightObject
         "expose_function" or "expose_binding" =>
             Unsupported(name, "it would call back into the interpreter from the browser's thread"),
 
-        "browser" => new PyBrowser(Bridge, _context.Browser
-            ?? throw Errors.Fail("this context has no browser")),
+        "browser" => _browser,
 
         _ => null,
     };

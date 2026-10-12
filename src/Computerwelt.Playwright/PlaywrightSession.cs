@@ -30,12 +30,19 @@ public sealed class PlaywrightSession : IAsyncDisposable
     private PlaywrightScope? _defaultScope;
     private bool _disposed;
 
-    private PlaywrightSession(IPlaywright playwright, PlaywrightOptions options, PlaywrightSandboxStatus sandboxStatus)
+    private PlaywrightSession(
+        IPlaywright playwright,
+        PlaywrightOptions options,
+        PlaywrightSandboxStatus sandboxStatus,
+        string? temporaryDirectory,
+        IReadOnlyList<string> writablePaths)
     {
         _playwright = playwright;
         Options = options;
         Policy = new NavigationPolicy(options);
         SandboxStatus = sandboxStatus;
+        TemporaryDirectory = temporaryDirectory;
+        WritablePaths = writablePaths;
     }
 
     /// <summary>The host's configuration, which a script cannot widen.</summary>
@@ -49,6 +56,15 @@ public sealed class PlaywrightSession : IAsyncDisposable
     /// and if not, why not.
     /// </summary>
     public PlaywrightSandboxStatus SandboxStatus { get; }
+
+    /// <summary>
+    /// The directory the driver and its browsers keep their temporary files in, or null when they
+    /// use the host's - because none was asked for, or because the driver could not be handed one.
+    /// </summary>
+    public string? TemporaryDirectory { get; }
+
+    /// <summary>What the sandbox lets the browser write to, or empty when it is not confined.</summary>
+    internal IReadOnlyList<string> WritablePaths { get; }
 
     /// <summary>
     /// The scope a sandbox registered with the session itself uses: the session's own host list
@@ -115,20 +131,64 @@ public sealed class PlaywrightSession : IAsyncDisposable
 
         options ??= new PlaywrightOptions();
 
+        string? temporary = null;
+
+        if (options.TemporaryDirectory is { } requested)
+        {
+            temporary = Path.GetFullPath(requested);
+            Directory.CreateDirectory(temporary);
+        }
+
+        var variables = temporary is null
+            ? new Dictionary<string, string>()
+            : DriverEnvironment.TemporaryDirectory(temporary);
+
+        Task<IPlaywright> Start()
+        {
+            var (starting, applied) = DriverEnvironment.Apply(variables, Microsoft.Playwright.Playwright.CreateAsync);
+
+            if (!applied)
+            {
+                temporary = null;
+            }
+
+            return starting;
+        }
+
         if (options.Sandbox is not { } sandbox)
         {
-            var playwright = await Microsoft.Playwright.Playwright.CreateAsync().ConfigureAwait(false);
+            var playwright = await Start().ConfigureAwait(false);
 
-            return new PlaywrightSession(playwright, options, PlaywrightSandboxStatus.NotRequested);
+            return new PlaywrightSession(playwright, options, PlaywrightSandboxStatus.NotRequested, temporary, []);
+        }
+
+        string? note = null;
+
+        if (temporary is not null && !DriverEnvironment.IsSupported)
+        {
+            // The driver will write to the host's temporary directory whatever was asked, so a
+            // ruleset granting only the one asked for would leave the browser unable to start.
+            note = "PlaywrightOptions.TemporaryDirectory could not be handed to this version of the Playwright "
+                + "driver, so the host's temporary directory is writable too";
+            sandbox = sandbox with { ReadWritePaths = [.. sandbox.ReadWritePaths, Path.GetTempPath()] };
         }
 
         // The driver is forked inside CreateAsync's synchronous part, so it is that part that has
         // to run on the confined thread; the rest of the start-up awaits on the thread pool.
-        var (starting, status) = await LandlockConfinement.RunAsync(sandbox, Microsoft.Playwright.Playwright.CreateAsync).ConfigureAwait(false);
+        var (starting, status) = await LandlockConfinement.RunAsync(sandbox, temporary, Start).ConfigureAwait(false);
+
+        if (note is not null && status.FileSystemConfined)
+        {
+            status = status with { Reason = status.Reason is null ? note : $"{status.Reason}; {note}" };
+        }
+
+        IReadOnlyList<string> writable = status.FileSystemConfined
+            ? LandlockConfinement.Grants(sandbox, temporary).ReadWrite
+            : [];
 
         try
         {
-            return new PlaywrightSession(await starting.ConfigureAwait(false), options, status);
+            return new PlaywrightSession(await starting.ConfigureAwait(false), options, status, temporary, writable);
         }
         catch (PlaywrightException exception) when (status.FileSystemConfined)
         {
@@ -221,14 +281,7 @@ public sealed class PlaywrightSession : IAsyncDisposable
 
             var playwright = _playwright ?? throw new ObjectDisposedException(nameof(PlaywrightSession));
 
-            var type = name switch
-            {
-                "firefox" => playwright.Firefox,
-                "webkit" => playwright.Webkit,
-                _ => playwright.Chromium,
-            };
-
-            var browser = await type.LaunchAsync(new BrowserTypeLaunchOptions
+            var browser = await TypeOf(playwright, name).LaunchAsync(new BrowserTypeLaunchOptions
             {
                 Headless = Options.Headless,
                 Args = Options.LaunchArguments.Count > 0 ? Options.LaunchArguments : null,
@@ -274,6 +327,87 @@ public sealed class PlaywrightSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(browser);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(policy);
+
+        CheckCanOpen(cancellationToken);
+
+        if (Options.Viewport is { } viewport)
+        {
+            options.ViewportSize = new ViewportSize { Width = viewport.Width, Height = viewport.Height };
+        }
+
+        return await AdoptAsync(await browser.NewContextAsync(options).ConfigureAwait(false), policy).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Launches a browser over the profile in <paramref name="profileDirectory"/> and adopts its
+    /// one context under the session's caps and <paramref name="policy"/>.
+    /// </summary>
+    /// <remarks>
+    /// A persistent context is its own browser process - Chromium will not share a profile
+    /// directory between two - so it is launched here, with the session's launch options, rather
+    /// than opened on the shared browser. Closing the context ends that process.
+    /// </remarks>
+    internal async Task<IBrowserContext> NewPersistentContextAsync(
+        string browserName,
+        string profileDirectory,
+        BrowserNewContextOptions options,
+        NavigationPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(policy);
+
+        if (!Allows(browserName))
+        {
+            throw new InvalidOperationException(
+                $"'{browserName}' is not available: this sandbox was configured with "
+                + $"[{string.Join(", ", BrowserNames)}]. Add it to PlaywrightOptions.Browsers.");
+        }
+
+        CheckCanOpen(cancellationToken);
+
+        BrowserTypeLaunchPersistentContextOptions launch;
+
+        try
+        {
+            launch = PersistentContextOptions.From(options);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new InvalidOperationException(
+                $"'{exception.Message}' cannot be set on a context that keeps a profile "
+                + "(PlaywrightScopeOptions.ProfileDirectory): the profile is what carries its cookies and storage.",
+                exception);
+        }
+
+        launch.Headless = Options.Headless;
+        launch.Args = Options.LaunchArguments.Count > 0 ? Options.LaunchArguments : null;
+        launch.Channel = Options.Channel;
+        launch.ExecutablePath = Options.ExecutablePath;
+        launch.Timeout = Options.LaunchTimeout;
+
+        if (Options.Viewport is { } viewport)
+        {
+            launch.ViewportSize = new ViewportSize { Width = viewport.Width, Height = viewport.Height };
+        }
+
+        Directory.CreateDirectory(profileDirectory);
+
+        var playwright = _playwright ?? throw new ObjectDisposedException(nameof(PlaywrightSession));
+        var context = await TypeOf(playwright, browserName).LaunchPersistentContextAsync(profileDirectory, launch).ConfigureAwait(false);
+
+        // A persistent context opens with a blank page of its own. A script expects a new context
+        // to have none, and a host showing the scope's pages would show an empty one.
+        foreach (var page in context.Pages.ToArray())
+        {
+            await page.CloseAsync().ConfigureAwait(false);
+        }
+
+        return await AdoptAsync(context, policy).ConfigureAwait(false);
+    }
+
+    private void CheckCanOpen(CancellationToken cancellationToken)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         lock (_contexts)
@@ -289,31 +423,44 @@ public sealed class PlaywrightSession : IAsyncDisposable
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+    }
 
-        if (Options.Viewport is { } viewport)
-        {
-            options.ViewportSize = new ViewportSize { Width = viewport.Width, Height = viewport.Height };
-        }
-
-        var context = await browser.NewContextAsync(options).ConfigureAwait(false);
-
+    /// <summary>
+    /// Puts a context the session just opened under its timeouts and the request filter, and
+    /// counts it against the cap.
+    /// </summary>
+    /// <remarks>
+    /// Every context the sandbox uses comes through here, whichever way it was opened, which is
+    /// what makes the request filter hold for all of them.
+    /// </remarks>
+    private async Task<IBrowserContext> AdoptAsync(IBrowserContext context, NavigationPolicy policy)
+    {
         context.SetDefaultTimeout(Options.DefaultTimeout);
         context.SetDefaultNavigationTimeout(Options.DefaultTimeout);
 
-        // The backstop the whole policy rests on: `page.goto` is checked for the sake of a
-        // good error message, but *this* is what a redirect, an iframe, an image or a
-        // `fetch()` the page issues has to get past.
-        await context.RouteAsync("**/*", route =>
+        try
         {
-            if (policy.IsAllowed(route.Request.Url))
+            // The backstop the whole policy rests on: `page.goto` is checked for the sake of a
+            // good error message, but *this* is what a redirect, an iframe, an image or a
+            // `fetch()` the page issues has to get past.
+            await context.RouteAsync("**/*", route =>
             {
-                _ = route.ContinueAsync();
-            }
-            else
-            {
-                _ = route.AbortAsync("blockedbyclient");
-            }
-        }).ConfigureAwait(false);
+                if (policy.IsAllowed(route.Request.Url))
+                {
+                    _ = route.ContinueAsync();
+                }
+                else
+                {
+                    _ = route.AbortAsync("blockedbyclient");
+                }
+            }).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A context the filter is not on must never reach a script.
+            await context.CloseAsync().ConfigureAwait(false);
+            throw;
+        }
 
         context.Close += OnContextClosed;
 
@@ -324,6 +471,13 @@ public sealed class PlaywrightSession : IAsyncDisposable
 
         return context;
     }
+
+    private static IBrowserType TypeOf(IPlaywright playwright, string name) => name switch
+    {
+        "firefox" => playwright.Firefox,
+        "webkit" => playwright.Webkit,
+        _ => playwright.Chromium,
+    };
 
     /// <summary>Forgets a context the sandbox closed, so it stops counting against the cap.</summary>
     public void Release(IBrowserContext context)

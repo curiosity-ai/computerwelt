@@ -43,13 +43,15 @@ public sealed record PlaywrightSandboxOptions
     public bool IncludeSystemPaths { get; init; } = true;
 
     /// <summary>
-    /// Whether the operating system's temporary directory is writable.
+    /// Whether the browser's temporary directory is writable:
+    /// <see cref="PlaywrightOptions.TemporaryDirectory"/> when the host set one, the operating
+    /// system's otherwise.
     /// </summary>
     /// <remarks>
-    /// The driver creates each browser profile under it — the directory comes from the host
-    /// process's <c>TMPDIR</c>, which the driver inherits — so a browser cannot start without
-    /// it. Turn it off only when <see cref="ReadWritePaths"/> names wherever <c>TMPDIR</c>
-    /// points.
+    /// The driver creates each browser profile under it, so a browser cannot start without it.
+    /// Setting <see cref="PlaywrightOptions.TemporaryDirectory"/> is how the host keeps the browser
+    /// out of the system-wide <c>/tmp</c>, which other processes share. Turn this off only when
+    /// <see cref="ReadWritePaths"/> names the temporary directory already.
     /// </remarks>
     public bool AllowTemporaryDirectory { get; init; } = true;
 

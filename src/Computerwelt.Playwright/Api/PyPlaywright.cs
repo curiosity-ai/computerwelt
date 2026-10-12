@@ -215,8 +215,11 @@ internal sealed class PyBrowserType : PlaywrightObject
                 + "Add it to PlaywrightOptions.Browsers.");
         }
 
-        var browser = Bridge.Block(() => Bridge.Session.GetBrowserAsync(_name));
+        // A tenant with profiles launches a browser per context, so the shared one is not needed.
+        var browser = Bridge.Scope.ProfileDirectory is null
+            ? Bridge.Block(() => Bridge.Session.GetBrowserAsync(_name))
+            : null;
 
-        return new PyBrowser(Bridge, browser);
+        return new PyBrowser(Bridge, _name, browser);
     }
 }

@@ -91,7 +91,13 @@ internal static class LandlockConfinement
     /// The paths a ruleset built from <paramref name="options"/> grants, split by access, with the
     /// ones that do not exist dropped.
     /// </summary>
-    public static (IReadOnlyList<string> ReadOnly, IReadOnlyList<string> ReadWrite) Grants(PlaywrightSandboxOptions options)
+    /// <param name="options">The sandbox the host asked for.</param>
+    /// <param name="temporaryDirectory">
+    /// The temporary directory the driver was handed, or null when it uses the host's.
+    /// </param>
+    public static (IReadOnlyList<string> ReadOnly, IReadOnlyList<string> ReadWrite) Grants(
+        PlaywrightSandboxOptions options,
+        string? temporaryDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -122,7 +128,7 @@ internal static class LandlockConfinement
 
         if (options.AllowTemporaryDirectory)
         {
-            readWrite.Add(Path.GetTempPath());
+            readWrite.Add(temporaryDirectory ?? Path.GetTempPath());
         }
 
         // Chromium's shared memory, which it creates and removes as files.
@@ -142,6 +148,7 @@ internal static class LandlockConfinement
     /// </exception>
     public static async Task<(T Result, PlaywrightSandboxStatus Status)> RunAsync<T>(
         PlaywrightSandboxOptions options,
+        string? temporaryDirectory,
         Func<T> start)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -155,7 +162,7 @@ internal static class LandlockConfinement
         var abi = AbiVersion();
         var confineNetwork = options.AllowedTcpPorts is not null && abi >= 4;
         var completion = new TaskCompletionSource<(T, PlaywrightSandboxStatus)>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var (readOnly, readWrite) = Grants(options);
+        var (readOnly, readWrite) = Grants(options, temporaryDirectory);
 
         var thread = new Thread(() =>
         {
