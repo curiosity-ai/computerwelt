@@ -94,12 +94,15 @@ public sealed class NavigationPolicy
         return false;
     }
 
-    /// <summary>The sentence a refusal reports, which names the setting that would allow it.</summary>
+    /// <summary>
+    /// The sentence a refusal reports, which names the setting that would allow it - the session's
+    /// <see cref="PlaywrightOptions.AllowedHosts"/> or a scope's <see cref="PlaywrightScopeOptions.AllowedHosts"/>.
+    /// </summary>
     public string Refusal(string url) =>
         IsClosed
-            ? $"navigating to {url} is denied: this sandbox has no allowed hosts. "
-              + "Set PlaywrightOptions.AllowedHosts to name the ones it may reach."
-            : $"navigating to {url} is denied: it is not in PlaywrightOptions.AllowedHosts.";
+            ? $"navigating to {url} is denied: this sandbox may reach no hosts. "
+              + "The host names the ones it may in AllowedHosts."
+            : $"navigating to {url} is denied: it is not among the hosts this sandbox may reach (AllowedHosts).";
 
     private static bool Matches(string pattern, string host, string port)
     {
