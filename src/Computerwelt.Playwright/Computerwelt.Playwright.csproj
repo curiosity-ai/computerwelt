@@ -12,6 +12,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Landlock" />
     <PackageReference Include="Microsoft.Playwright" />
   </ItemGroup>
 

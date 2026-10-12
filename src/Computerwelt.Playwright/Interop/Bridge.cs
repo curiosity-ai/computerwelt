@@ -24,24 +24,30 @@ internal sealed class Bridge
 {
     private readonly CancellationToken _cancellationToken;
 
-    public Bridge(PythonHostContext context, PlaywrightSession session, CancellationToken cancellationToken)
+    public Bridge(PythonHostContext context, PlaywrightScope scope, CancellationToken cancellationToken)
     {
         Context = context;
-        Session = session;
+        Scope = scope;
         _cancellationToken = cancellationToken;
     }
 
     /// <summary>The run's environment: its filesystem, working directory and limits.</summary>
     public PythonHostContext Context { get; }
 
+    /// <summary>
+    /// The tenant's share of the browser backend: its host list and its cap. Every context this
+    /// run opens goes through it, so the host can see what the tenant has open.
+    /// </summary>
+    public PlaywrightScope Scope { get; }
+
     /// <summary>The host's browser backend, shared with every other run.</summary>
-    public PlaywrightSession Session { get; }
+    public PlaywrightSession Session => Scope.Session;
 
     /// <summary>The host's configuration.</summary>
     public PlaywrightOptions Options => Session.Options;
 
     /// <summary>What the browser may reach.</summary>
-    public NavigationPolicy Policy => Session.Policy;
+    public NavigationPolicy Policy => Scope.Policy;
 
     /// <summary>Every browser context this run opened, so all of them can be closed at once.</summary>
     public List<Api.PyBrowserContext> Contexts { get; } = [];
@@ -150,6 +156,33 @@ internal sealed class Bridge
 
         return bytes;
     }
+
+    /// <summary>
+    /// Tells the host about a screenshot or PDF the script took, through
+    /// <see cref="PlaywrightScopeOptions.OnCapture"/>.
+    /// </summary>
+    public void Captured(PlaywrightCaptureKind kind, byte[] bytes, string? path, string? pageUrl)
+    {
+        if (Scope.Options.OnCapture is not { } onCapture)
+        {
+            return;
+        }
+
+        var contentType = kind == PlaywrightCaptureKind.Pdf ? "application/pdf" : PlaywrightCapture.ImageType(bytes);
+
+        try
+        {
+            onCapture(new PlaywrightCapture(kind, bytes, contentType, path is null ? null : Absolute(path), pageUrl));
+        }
+#pragma warning disable CA1031 // The host's bookkeeping failing is not the script's error, and no host exception may reach it.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+    }
+
+    private string Absolute(string path) =>
+        path.StartsWith('/') ? path : Context.WorkingDirectory.TrimEnd('/') + "/" + path;
 
     /// <summary>Reads a file from the sandbox as UTF-8 text.</summary>
     public string ReadText(string path) => Encoding.UTF8.GetString(Read(path));

@@ -127,6 +127,39 @@ public sealed record PlaywrightOptions
     /// </remarks>
     public (int Width, int Height)? Viewport { get; init; }
 
+    /// <summary>
+    /// Confines the driver and every browser it launches with Landlock, or null to start them
+    /// unconfined.
+    /// </summary>
+    /// <remarks>
+    /// The navigation policy above decides what a page may ask for; the sandbox decides what the
+    /// browser process could reach if it were made to ask for anything else. See
+    /// <see cref="PlaywrightSandboxOptions"/>.
+    /// </remarks>
+    public PlaywrightSandboxOptions? Sandbox { get; init; }
+
+    /// <summary>
+    /// Where the driver and every browser it launches keep their temporary files, or null for the
+    /// host's own temporary directory.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A browser writes more there than one expects: the profile of every browser launched
+    /// without a <see cref="PlaywrightScopeOptions.ProfileDirectory"/>, the artifacts a page
+    /// produces, Chromium's own scratch files. Set, the directory is created and handed to the
+    /// driver as its <c>TMPDIR</c> - the host process's environment is left alone - and under
+    /// <see cref="Sandbox"/> it is the temporary directory
+    /// <see cref="PlaywrightSandboxOptions.AllowTemporaryDirectory"/> grants, instead of the
+    /// host's.
+    /// </para>
+    /// <para>
+    /// On a version of the Playwright package this cannot hand a variable to, the driver keeps the
+    /// host's temporary directory, and a sandboxed session grants that one as well and says so in
+    /// <see cref="PlaywrightSession.SandboxStatus"/>.
+    /// </para>
+    /// </remarks>
+    public string? TemporaryDirectory { get; init; }
+
     /// <summary>Turns a browser type into the name the Python API spells it with.</summary>
     internal static string NameOf(PlaywrightBrowser browser) => browser switch
     {

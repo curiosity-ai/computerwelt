@@ -824,6 +824,8 @@ internal sealed class PyPage : PlaywrightObject
             Bridge.Write(path, bytes);
         }
 
+        Bridge.Captured(PlaywrightCaptureKind.Screenshot, bytes, path, _page.Url);
+
         return new PyBytes(bytes);
     }
 
@@ -855,6 +857,8 @@ internal sealed class PyPage : PlaywrightObject
         {
             Bridge.Write(path, bytes);
         }
+
+        Bridge.Captured(PlaywrightCaptureKind.Pdf, bytes, path, _page.Url);
 
         return new PyBytes(bytes);
     }

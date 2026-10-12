@@ -74,4 +74,104 @@ public static class PlaywrightExtensions
 
         return builder.WithPython((options ?? new PythonOptions()).WithPlaywright(session));
     }
+    /// <summary>
+    /// Makes <c>playwright</c> importable from a bare <see cref="PythonRunner"/>, over one
+    /// tenant's scope of a shared session.
+    /// </summary>
+    public static PythonRunner WithPlaywright(
+        this PythonRunner runner,
+        PlaywrightScope scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(runner);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        runner.Libraries.AddRange(PlaywrightLibrary.For(scope, cancellationToken));
+        return runner;
+    }
+
+    /// <summary>Returns options whose <c>python</c> command can import <c>playwright</c> over one tenant's scope.</summary>
+    public static PythonOptions WithPlaywright(
+        this PythonOptions options,
+        PlaywrightScope scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return options with
+        {
+            Libraries = [.. options.Libraries, .. PlaywrightLibrary.For(scope, cancellationToken)],
+        };
+    }
+
+    /// <summary>
+    /// Returns options whose <c>python</c> command can import <c>playwright</c> over a scope the
+    /// host resolves at import time.
+    /// </summary>
+    /// <remarks>
+    /// See <see cref="PlaywrightLibrary(Func{PlaywrightScope}, CancellationToken)"/>: for a sandbox
+    /// built once whose browser may come and go afterwards.
+    /// </remarks>
+    public static PythonOptions WithPlaywright(
+        this PythonOptions options,
+        Func<PlaywrightScope> scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return options with
+        {
+            Libraries = [.. options.Libraries, .. PlaywrightLibrary.For(scope, cancellationToken)],
+        };
+    }
+
+    /// <summary>
+    /// Builds a shell whose <c>python</c> command drives the host's browser as one tenant of it:
+    /// the scope's host list filters every page, and the host sees the pages it opens.
+    /// </summary>
+    public static BashBuilder WithPlaywright(
+        this BashBuilder builder,
+        PlaywrightScope scope,
+        PythonOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return builder.WithPython((options ?? new PythonOptions()).WithPlaywright(scope));
+    }
+
+    /// <summary>
+    /// Returns options whose <c>python</c> command can import <c>playwright</c> over a scope the
+    /// host resolves asynchronously at import time.
+    /// </summary>
+    public static PythonOptions WithPlaywright(
+        this PythonOptions options,
+        Func<CancellationToken, Task<PlaywrightScope>> scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return options with
+        {
+            Libraries = [.. options.Libraries, .. PlaywrightLibrary.For(scope, cancellationToken)],
+        };
+    }
+
+    /// <summary>
+    /// Builds a shell whose <c>python</c> command drives the browser through a scope the host
+    /// resolves each time a program imports <c>playwright</c>.
+    /// </summary>
+    public static BashBuilder WithPlaywright(
+        this BashBuilder builder,
+        Func<PlaywrightScope> scope,
+        PythonOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        return builder.WithPython((options ?? new PythonOptions()).WithPlaywright(scope));
+    }
 }

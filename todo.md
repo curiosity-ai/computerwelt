@@ -186,6 +186,55 @@ derives from `Error` as upstream's does. Neither class is in `PyExceptionType.Re
 an unregistered sandbox cannot even name them — which is why `DefineHostException` exists
 alongside the built-in set.
 
+### Hosting it for many tenants: scopes and the Landlock sandbox
+
+A host that serves many conversations from one browser needs three things the first round
+did not have, and all three are now in the package.
+
+**A scope per tenant.** `PlaywrightSession.CreateScope(PlaywrightScopeOptions)` hands out one
+tenant's share of the session: its own host list (which *replaces* the session's, so a scope
+can be narrower as well as wider), its own cap on contexts, and a `ConfigureContext` hook the
+host runs on every context before the script sees it — an init script that signs the page in,
+cookies, headers. `WithPlaywright(scope)` routes a sandbox's contexts through it, and the scope
+exposes `Contexts` and `Pages` so the host can watch what a tenant's browser is doing (a live
+view) without the script's cooperation. Disposing a scope closes what it left open and leaves
+the browser to everyone else. `WithPlaywright(Func<PlaywrightScope>)` resolves the scope at
+import time, per run, for a sandbox that is built once while its browser comes and goes; a
+resolver that throws `PlaywrightUnavailableException` becomes the program's `ImportError`.
+
+**A kernel-enforced sandbox around the browser.** The navigation policy decides what a page
+may ask for. `PlaywrightOptions.Sandbox` decides what the browser process could reach if it
+were made to ask for something else: the driver is started from a thread confined by a
+Landlock ruleset, so the driver and every browser it launches inherit it, and the host
+process is never restricted. The grants are the system library paths, the driver, the
+browsers directory, the temporary directory (where the driver puts each profile), `/dev/shm`,
+and whatever the host adds; `AllowedTcpPorts` confines TCP connects on ABI 4+.
+`PlaywrightSession.SandboxStatus` says what was actually enforced; `Required` refuses to start
+unconfined. Two kernel rules shaped the code: a rule may only grant rights the ruleset handles
+(`FileSystem.CORE` handles no sockets or FIFOs), and a rule on a regular file may not grant a
+directory-only right — both are `EINVAL`, and the first version hit both. `/run` is not
+granted (container secrets live there); `/proc` is, safely, because Landlock also scopes
+ptrace and so a confined browser cannot read the host's `/proc/<pid>/environ`.
+
+**Where the browser writes.** `PlaywrightOptions.TemporaryDirectory` becomes the driver's
+`TMPDIR` (through the .NET package's internal driver-environment table, filled only while the
+driver starts, so the host's environment is untouched) and, under the sandbox, replaces `/tmp`
+in the grant. `PlaywrightScopeOptions.ProfileDirectory` makes a tenant's contexts persistent
+contexts — a browser process each, over numbered profile folders, the lowest free one reused —
+so its storage survives between runs and never sits in the shared browser. Options are copied
+onto the persistent-context type by name, which refuses the one it has no slot for
+(`StorageState`) instead of dropping it. A persistent context opens with a blank page, which is
+closed so a new context looks like one.
+
+Writing the port test found a bug upstream of us: the `Landlock` package's `AddPortRule` never
+passed the port to the kernel, so every port rule allowed port 0 (fixed in
+curiosity-ai/landlock-sharp#1).
+
+**An installer that reports.** `PlaywrightBrowsers.InstallAsync(browsers, output)` streams the
+driver's output line by line, and `GetInstallationsAsync` / `IsInstalledAsync` ask the driver
+(`install --dry-run`) which build it would launch and whether it is on disk — after an upgrade
+the previous build's folder is still there and is not the one that will run.
+
 ### What it found in the rest of the port
 
 | Found | Was | Now |
@@ -762,7 +811,7 @@ filesystem, with no process, no host disk and no network of its own.
 | `WithoutBuiltin` | a name | `src/Computerwelt.Emulation.Bash/BashBuilder.cs` |
 | `PythonRunner.Libraries`, `PythonOptions.Libraries` | `PythonLibrary` | `src/Computerwelt.Emulation.Python/Extensibility/` |
 | `PythonRunner.HostFunctions`, `PythonOptions.HostFunctions` | `Func<PythonHostContext, PyObject[], PyObject>` | `.../Extensibility/PythonHostContext.cs` |
-| `WithPlaywright` | a `PlaywrightSession` | `src/Computerwelt.Playwright/PlaywrightExtensions.cs` |
+| `WithPlaywright` | a `PlaywrightSession`, a `PlaywrightScope`, or a `Func<PlaywrightScope>` | `src/Computerwelt.Playwright/PlaywrightExtensions.cs` |
 | `VirtualMachine.WhenRunCompleted` | an `Action` | `src/Computerwelt.Emulation.Python/Runtime/VirtualMachine.cs` |
 
 ### The four decisions worth recording
@@ -803,6 +852,6 @@ inside a script: host code is registered by the host, before the session is buil
 | `Computerwelt.Emulation.Bash.Tests/ExtensibilityTests` | 22 — dispatch, override, withholding, resolver ordering, budget charging, the context helpers, two sessions sharing one command |
 | `Computerwelt.Emulation.Python.Tests/ExtensibilityTests` | 27 — host and source libraries, host functions over a filesystem, per-run freshness, laziness, cycles, a library that will not compile, limits |
 | `Computerwelt.Tests/ExtensibilityTests` | 12 — a host command, a host library and a host function over one filesystem |
-| `Computerwelt.Playwright.Tests` | 40 — the navigation policy on its own, 22 browser scenarios written as Python, and 5 on what happens to a context when the script that opened it stops caring |
+| `Computerwelt.Playwright.Tests` | 57 — the navigation policy on its own, 22 browser scenarios written as Python, 5 on what happens to a context when the script that opened it stops caring, 11 on scopes, resolvers, captures and the installer, and 6 on the Landlock sandbox |
 
 `samples/Computerwelt.Sample.Extensibility/` is every point in one runnable program.
