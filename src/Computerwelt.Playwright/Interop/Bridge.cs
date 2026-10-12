@@ -24,24 +24,30 @@ internal sealed class Bridge
 {
     private readonly CancellationToken _cancellationToken;
 
-    public Bridge(PythonHostContext context, PlaywrightSession session, CancellationToken cancellationToken)
+    public Bridge(PythonHostContext context, PlaywrightScope scope, CancellationToken cancellationToken)
     {
         Context = context;
-        Session = session;
+        Scope = scope;
         _cancellationToken = cancellationToken;
     }
 
     /// <summary>The run's environment: its filesystem, working directory and limits.</summary>
     public PythonHostContext Context { get; }
 
+    /// <summary>
+    /// The tenant's share of the browser backend: its host list and its cap. Every context this
+    /// run opens goes through it, so the host can see what the tenant has open.
+    /// </summary>
+    public PlaywrightScope Scope { get; }
+
     /// <summary>The host's browser backend, shared with every other run.</summary>
-    public PlaywrightSession Session { get; }
+    public PlaywrightSession Session => Scope.Session;
 
     /// <summary>The host's configuration.</summary>
     public PlaywrightOptions Options => Session.Options;
 
     /// <summary>What the browser may reach.</summary>
-    public NavigationPolicy Policy => Session.Policy;
+    public NavigationPolicy Policy => Scope.Policy;
 
     /// <summary>Every browser context this run opened, so all of them can be closed at once.</summary>
     public List<Api.PyBrowserContext> Contexts { get; } = [];

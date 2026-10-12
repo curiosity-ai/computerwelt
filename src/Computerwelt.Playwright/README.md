@@ -52,6 +52,67 @@ options.WithPlaywright(session);                       // an existing PythonOpti
 A sandbox that does not register it has no importable `playwright` and no route to a
 browser, exactly as a sandbox with no filesystem has no `open`.
 
+## Many tenants, one browser: scopes
+
+A host serving many sandboxes from one browser gives each a **scope**: its own host list, its
+own cap, and host code that runs on every context it opens.
+
+```csharp
+await using var scope = session.CreateScope(new PlaywrightScopeOptions
+{
+    AllowedHosts = ["*.example.com", "localhost:8080"],   // replaces the session's list
+    MaxContexts = 2,
+    ConfigureContext = (context, ct) => context.AddInitScriptAsync("localStorage.setItem('k', 'v')"),
+});
+
+var bash = Bash.CreateBuilder().WithPlaywright(scope).Build();
+
+foreach (var page in scope.Pages)                          // what the tenant has open, right now
+{
+    var jpeg = await page.ScreenshotAsync(new() { Type = ScreenshotType.Jpeg });
+}
+```
+
+A sandbox built once whose browser may come and go later registers a resolver instead —
+`WithPlaywright(() => current ?? throw new PlaywrightUnavailableException("the browser is off"))`
+— which is asked on each run's first `import playwright`; what it throws becomes the program's
+`ImportError`.
+
+## Confining the browser with Landlock
+
+The navigation policy decides what a page may *ask* for. `PlaywrightOptions.Sandbox` decides
+what the browser process can reach if it is ever made to ask for anything else:
+
+```csharp
+await using var session = await PlaywrightSession.CreateAsync(new PlaywrightOptions
+{
+    AllowedHosts = ["*.example.com"],
+    Sandbox = new PlaywrightSandboxOptions
+    {
+        ReadWritePaths = ["/srv/browser-scratch"],
+        AllowedTcpPorts = [80, 443],                       // Landlock ABI 4+ (Linux 6.7)
+        Required = true,                                   // refuse to start unconfined
+    },
+});
+
+Console.WriteLine(session.SandboxStatus);                  // sandboxed with Landlock ABI 7, TCP ports confined
+```
+
+The driver is started from a throw-away thread confined by a
+[Landlock](https://landlock.io) ruleset, so the driver and every browser it launches inherit
+it and the host process is never restricted. Granted by default: the system library paths
+(`/usr`, `/lib`, `/etc`, `/proc`, `/sys`, …), the application and runtime directories, the
+driver, the browsers directory, the temporary directory (where the driver creates each
+profile) and `/dev/shm`. Everything else — the host's data, its home directory, `/run` — is
+denied by the kernel. Off Linux, or on a kernel without Landlock, the session starts
+unconfined and `SandboxStatus` says why, unless `Required` is set.
+
+## Installing the browsers
+
+`PlaywrightBrowsers.InstallAsync(browsers, line => log(line))` streams the driver's progress as
+it downloads, and is a no-op on an up-to-date machine. `GetInstallationsAsync` /
+`IsInstalledAsync` ask the driver which build it would launch and whether it is on disk.
+
 ## The one deliberate exception, stated plainly
 
 Computerwelt's first rule is **no process spawning**, and a browser is a process. This

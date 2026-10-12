@@ -34,7 +34,7 @@ public sealed class PlaywrightLibrary
     // And one module object per run, so that the name reached through the package and the
     // name imported directly are the same object — as they are in CPython.
     private readonly ConditionalWeakTable<VirtualMachine, PyObject> _modules = [];
-    private readonly PlaywrightSession _session;
+    private readonly Func<PlaywrightScope> _scope;
     private readonly CancellationToken _cancellationToken;
 
     /// <summary>Builds the library over a host-owned browser session.</summary>
@@ -48,7 +48,45 @@ public sealed class PlaywrightLibrary
     {
         ArgumentNullException.ThrowIfNull(session);
 
-        _session = session;
+        _scope = () => session.DefaultScope;
+        _cancellationToken = cancellationToken;
+    }
+
+    /// <summary>Builds the library over one tenant's scope of a host-owned session.</summary>
+    /// <param name="scope">The tenant's scope, which the host owns and disposes.</param>
+    /// <param name="cancellationToken">Stops further driver calls once it is cancelled.</param>
+    public PlaywrightLibrary(PlaywrightScope scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+
+        _scope = () => scope;
+        _cancellationToken = cancellationToken;
+    }
+
+    /// <summary>
+    /// Builds the library over a scope the host resolves when a program first imports
+    /// <c>playwright</c>, once per run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// For a host whose sandbox outlives any one browser session: the shell is built once, while
+    /// the browser may be switched on, reconfigured or switched off afterwards. The resolver runs
+    /// at import time, so a run always gets the scope as it is now.
+    /// </para>
+    /// <para>
+    /// A resolver that throws makes the import fail with an <c>ImportError</c> carrying its
+    /// message — throw a <see cref="PlaywrightUnavailableException"/> to say why the browser is
+    /// not available ("the browser is disabled", "every browser session is in use"). No host
+    /// exception reaches the program either way.
+    /// </para>
+    /// </remarks>
+    /// <param name="scope">Answers the scope for the run that is importing.</param>
+    /// <param name="cancellationToken">Stops further driver calls once it is cancelled.</param>
+    public PlaywrightLibrary(Func<PlaywrightScope> scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+
+        _scope = scope;
         _cancellationToken = cancellationToken;
     }
 
@@ -70,10 +108,49 @@ public sealed class PlaywrightLibrary
         CancellationToken cancellationToken = default) =>
         new PlaywrightLibrary(session, cancellationToken).Modules;
 
+    /// <summary>The modules to register over one tenant's scope.</summary>
+    public static IReadOnlyList<PythonLibrary> For(
+        PlaywrightScope scope,
+        CancellationToken cancellationToken = default) =>
+        new PlaywrightLibrary(scope, cancellationToken).Modules;
+
+    /// <summary>The modules to register over a scope resolved per run.</summary>
+    public static IReadOnlyList<PythonLibrary> For(
+        Func<PlaywrightScope> scope,
+        CancellationToken cancellationToken = default) =>
+        new PlaywrightLibrary(scope, cancellationToken).Modules;
+
+    private PlaywrightScope ResolveScope()
+    {
+        PlaywrightScope scope;
+
+        try
+        {
+            scope = _scope();
+        }
+        catch (Exception exception)
+        {
+            throw new PyRaise(new PyException(
+                PyExceptionType.ImportError,
+                exception is PlaywrightUnavailableException
+                    ? $"playwright is not available: {exception.Message}"
+                    : $"playwright is not available: {exception.GetType().Name}: {exception.Message}"));
+        }
+
+        if (scope is null || scope.IsDisposed)
+        {
+            throw new PyRaise(new PyException(
+                PyExceptionType.ImportError,
+                "playwright is not available: the browser session this sandbox was given has been closed"));
+        }
+
+        return scope;
+    }
+
     private Bridge BridgeFor(PythonHostContext context) =>
         _bridges.GetValue(context.Machine, _ =>
         {
-            var bridge = new Bridge(context, _session, _cancellationToken);
+            var bridge = new Bridge(context, ResolveScope(), _cancellationToken);
 
             // The safety net. A program that used `with sync_playwright()` has already given
             // its contexts back by the time this runs and it does nothing; a program that

@@ -164,7 +164,7 @@ internal sealed class PyBrowser : PlaywrightObject
 
         arguments.Done(0);
 
-        var context = Bridge.Block(() => Bridge.Session.NewContextAsync(_browser, options));
+        var context = Bridge.Block(() => Bridge.Scope.NewContextAsync(_browser, options));
         var wrapper = new PyBrowserContext(Bridge, context);
 
         Bridge.Contexts.Add(wrapper);
@@ -383,7 +383,7 @@ internal sealed class PyBrowserContext : PlaywrightObject
         _pages.Clear();
         Bridge.Contexts.Remove(this);
         Bridge.Block(() => _context.CloseAsync());
-        Bridge.Session.Release(_context);
+        Bridge.Scope.Release(_context);
     }
 
     /// <summary>

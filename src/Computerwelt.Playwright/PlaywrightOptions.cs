@@ -127,6 +127,17 @@ public sealed record PlaywrightOptions
     /// </remarks>
     public (int Width, int Height)? Viewport { get; init; }
 
+    /// <summary>
+    /// Confines the driver and every browser it launches with Landlock, or null to start them
+    /// unconfined.
+    /// </summary>
+    /// <remarks>
+    /// The navigation policy above decides what a page may ask for; the sandbox decides what the
+    /// browser process could reach if it were made to ask for anything else. See
+    /// <see cref="PlaywrightSandboxOptions"/>.
+    /// </remarks>
+    public PlaywrightSandboxOptions? Sandbox { get; init; }
+
     /// <summary>Turns a browser type into the name the Python API spells it with.</summary>
     internal static string NameOf(PlaywrightBrowser browser) => browser switch
     {
