@@ -330,10 +330,7 @@ public sealed class PlaywrightSession : IAsyncDisposable
 
         CheckCanOpen(cancellationToken);
 
-        if (Options.Viewport is { } viewport)
-        {
-            options.ViewportSize = new ViewportSize { Width = viewport.Width, Height = viewport.Height };
-        }
+        options.ViewportSize = Options.ViewportFor(options.ViewportSize);
 
         return await AdoptAsync(await browser.NewContextAsync(options).ConfigureAwait(false), policy).ConfigureAwait(false);
     }
@@ -386,10 +383,7 @@ public sealed class PlaywrightSession : IAsyncDisposable
         launch.ExecutablePath = Options.ExecutablePath;
         launch.Timeout = Options.LaunchTimeout;
 
-        if (Options.Viewport is { } viewport)
-        {
-            launch.ViewportSize = new ViewportSize { Width = viewport.Width, Height = viewport.Height };
-        }
+        launch.ViewportSize = Options.ViewportFor(launch.ViewportSize);
 
         Directory.CreateDirectory(profileDirectory);
 

@@ -1,3 +1,5 @@
+using Microsoft.Playwright;
+
 namespace Computerwelt.Playwright;
 
 /// <summary>
@@ -123,9 +125,29 @@ public sealed record PlaywrightOptions
     /// <remarks>
     /// Set, it wins over a <c>viewport=</c> a script passes to <c>new_context</c> — it is
     /// how a host pins what a screenshot will look like. Left null, which is the default,
-    /// the script decides and Playwright's own default applies.
+    /// the script decides, and <see cref="DefaultViewport"/> (or Playwright's own default) applies
+    /// when it does not.
     /// </remarks>
     public (int Width, int Height)? Viewport { get; init; }
+
+    /// <summary>
+    /// The viewport a context gets when the script asks for none, or null for Playwright's own
+    /// (1280×720).
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="Viewport"/> this is only a default: a <c>viewport=</c> or
+    /// <c>no_viewport=True</c> the script passes to <c>new_context</c> or <c>new_page</c> is
+    /// honoured, and so is <c>page.set_viewport_size</c>. When both are set, <see cref="Viewport"/>
+    /// wins.
+    /// </remarks>
+    public (int Width, int Height)? DefaultViewport { get; init; }
+
+    /// <summary>The viewport a context is opened with, given the one the script asked for.</summary>
+    internal ViewportSize? ViewportFor(ViewportSize? requested) =>
+        Viewport is { } pinned ? new() { Width = pinned.Width, Height = pinned.Height }
+        : requested is not null ? requested
+        : DefaultViewport is { } fallback ? new() { Width = fallback.Width, Height = fallback.Height }
+        : null;
 
     /// <summary>
     /// Confines the driver and every browser it launches with Landlock, or null to start them
