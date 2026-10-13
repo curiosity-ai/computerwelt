@@ -34,6 +34,7 @@ await using var session = await PlaywrightSession.CreateAsync(new PlaywrightOpti
     Browsers = [PlaywrightBrowser.Chromium],
     AllowedHosts = ["*.example.com", "localhost:8080"],
     DefaultTimeout = 15_000,
+    DefaultViewport = (1440, 900), // when a script asks for no size; Viewport = (...) would pin it instead
 });
 
 var bash = Bash.CreateBuilder()
