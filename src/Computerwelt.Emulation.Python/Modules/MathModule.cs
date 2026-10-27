@@ -691,7 +691,7 @@ public static class MathModule
     }
 
     /// <summary>The natural logarithm of the gamma function, by the Lanczos series.</summary>
-    private static double LogGamma(double value)
+    internal static double LogGamma(double value)
     {
         double[] coefficients =
         [

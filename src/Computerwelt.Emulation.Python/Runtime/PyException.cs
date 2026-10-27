@@ -32,6 +32,12 @@ public sealed class PyException : PyObject
     /// <summary>Traceback frames, innermost last.</summary>
     public List<TracebackFrame> Traceback { get; } = [];
 
+    /// <summary>
+    /// Attributes a host library attaches to an exception it raises — the <c>msg</c>,
+    /// <c>doc</c> and <c>pos</c> of a <c>JSONDecodeError</c>, for one.
+    /// </summary>
+    public Dictionary<string, PyObject>? Fields { get; init; }
+
     /// <inheritdoc />
     public override string TypeName => ExceptionType.Name;
 
@@ -50,7 +56,7 @@ public sealed class PyException : PyObject
         "args" => new PyTuple([.. Arguments]),
         "__context__" => (PyObject?)Context ?? PyNone.Instance,
         "__cause__" => (PyObject?)Cause ?? PyNone.Instance,
-        _ => null,
+        _ => Fields is not null && Fields.TryGetValue(name, out var field) ? field : null,
     };
 
     /// <summary>True when this exception is an instance of <paramref name="type"/> or a subtype.</summary>
@@ -124,6 +130,12 @@ public sealed class PyExceptionType : PyObject
 
     /// <summary>The base class, or null for <c>BaseException</c>.</summary>
     public PyExceptionType? BaseType { get; }
+
+    /// <summary>
+    /// How calling the class builds an instance, for a class whose constructor takes more
+    /// than a message — null for the ordinary one-message shape.
+    /// </summary>
+    public Func<PyObject[], PyException>? Factory { get; set; }
 
     /// <summary>
     /// A second base, for the one class in the hierarchy that has two.

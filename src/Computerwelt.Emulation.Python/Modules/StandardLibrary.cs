@@ -61,6 +61,18 @@ public static class StandardLibrary
             }
         }
 
+        // `from json.decoder import JSONDecodeError` is the commonest spelling there is, so
+        // the submodules are importable by name as well as reachable as attributes.
+        if (modules["json"].GetAttribute("decoder") is { } decoder)
+        {
+            modules["json.decoder"] = decoder;
+        }
+
+        if (modules["json"].GetAttribute("encoder") is { } encoder)
+        {
+            modules["json.encoder"] = encoder;
+        }
+
         return modules;
     }
 
@@ -77,6 +89,8 @@ public static class StandardLibrary
         ["math"] = MathModule.Create(),
         ["sys"] = SysModule.Create(machine, arguments, standardInput),
         ["json"] = JsonModule.Create(machine),
+        ["random"] = RandomModule.Create(),
+        ["csv"] = CsvModule.Create(machine),
         ["asyncio"] = AsyncioModule.Create(machine),
         ["collections"] = SupportModules.CreateCollections(machine),
         ["itertools"] = SupportModules.CreateItertools(machine),

@@ -30,7 +30,7 @@ corpus does not reach. No host exception escapes to a script.
 `tests/Computerwelt.AgentTests/` — 153 covering the shell and Python operations a caller
 actually performs, plus upstream's 57 `python` command cases.
 
-**Extensions:** 12 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
+**Extensions:** 17 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
 have. They are kept apart from upstream's corpus deliberately — see below.
 
 **Current state — browser:** `Computerwelt.Playwright` is a separate, optional package that
@@ -90,7 +90,31 @@ off, which is the check that the port still stands on upstream's corpus alone.
 | `os.walk(..., max_depth=N)` | not CPython's either — a bound the caller asks for, which ends the walk cleanly | `os__walk_depth.py` |
 | `io` | `io.open`, `StringIO`, `BytesIO`, `UnsupportedOperation` | `io__module.py` |
 | `sys.argv`, `sys.exit`, `input`, `sys.stdin` | the host-facing four from the previous round | `sys__*.py` |
+| `json` | `dump`/`load`, `default=`, `check_circular`, every decoder hook (`object_hook`, `object_pairs_hook`, `parse_float`, `parse_int`, `parse_constant`), `strict`, `JSONEncoder`/`JSONDecoder`, `cls=`, `json.decoder`/`json.encoder`, and `JSONDecodeError.msg/doc/pos/lineno/colno` — upstream rejects all of these by name. The decoder now follows the JSON number grammar and whitespace set, validates `\u` escapes digit by digit, refuses a BOM on text, detects the encoding of bytes, and caps nesting at the recursion limit instead of recursing on the host's stack | `json__hooks_and_classes.py` |
+| `random` | the whole module: a Mersenne Twister seeded as `_randommodule.c` seeds it, with `random.py`'s algorithms drawing in the same order, so **a seeded run reproduces CPython's numbers** — `random`, `getrandbits`, `randbytes`, `randrange`, `randint`, `choice`, `shuffle`, `sample` (with `counts`), `choices`, `uniform`, `triangular`, `gauss`, `normalvariate`, `lognormvariate`, `expovariate`, `vonmisesvariate`, `gammavariate`, `betavariate`, `paretovariate`, `weibullvariate`, `binomialvariate`, `getstate`/`setstate`, `Random`, `SystemRandom`. Every expected value in the fixture was produced by CPython 3.13 | `random__cpython_vectors.py`, `random__behaviour.py` |
+| `csv` | a port of `_csv.c` and `csv.py`: `reader`/`writer` (the same state machine and quoting decisions), all six `QUOTE_*` modes, dialects and the registry, `field_size_limit`, `DictReader`, `DictWriter`, `Sniffer` (`sniff`, `has_header`). Over any iterable of strings and anything with `write`, so no filesystem is needed. Expected values produced by CPython 3.13 | `csv__cpython_behaviour.py`, `csv__files.py` |
 | `__call__` | an instance whose class defines it is callable, and goes wherever a function goes. Upstream lists the dunder among the protocols it does not dispatch (`limitations/classes.md`) | `class__call.py` |
+
+Where the three newest modules deliberately differ from CPython:
+
+- **No subclassing.** Classes in this interpreter do not inherit — a base in the `class`
+  statement parses and is then never consulted — so `class E(json.JSONEncoder)`,
+  `class D(csv.Dialect)` and `class R(random.Random)` produce classes without the base's
+  members. What replaces each: `cls=`
+  accepts the built-in class or any factory returning an object with `encode` / `decode`;
+  a dialect is a name, a built-in class, or any object with the right attributes; `default=`
+  covers the encoder case almost every subclass exists for.
+- **`csv` and `open(..., newline='')`.** The idiom CPython's docs prescribe is refused here (see
+  the table above), and `monty-spec/open__fs.py` pins that. `csv` does not need it — nothing
+  translates line endings — so a script that leaves `newline=''` out behaves identically.
+- **`json.JSONEncoder.iterencode`** returns the document as one chunk. **`DictWriter`**'s
+  "fields not in fieldnames" message lists them in the dict's order, where CPython's order is a
+  set's. **`csv.Error`** is named `Error`, as CPython's `__name__` is, so an uncaught one
+  prints `Error: …` where CPython prints `_csv.Error: …`.
+- **`random` caps what one call may build** — 2^27 bits for `getrandbits`/`randbytes`, 2^24
+  items for `choices`/`sample` — and raises `MemoryError` past it, because the instruction
+  limit does not count work done inside a builtin. The module draws on host entropy when
+  unseeded (and for `SystemRandom`), the one place the sandbox reads from outside itself.
 
 One engine sits behind `fnmatch`, `glob` and `Path.glob`, because CPython's three agree on
 what a pattern means and differ only in what they match it against. `os.walk` is iterative
@@ -124,7 +148,7 @@ Recorded, not fixed, because upstream defines the surface and this port follows 
 | Absent | Note |
 |---|---|
 | `open(..., newline='')` | Refused, though nothing here translates line endings and it would describe what already happens. `tests/monty-spec/open__fs.py` pins the refusal; binary mode is the way to ask for exact bytes |
-| `shutil`, `argparse`, `textwrap`, `difflib`, `tempfile`, `csv`, `hashlib`, `base64`, `string`, `functools`, … | Not ported. `StandardLibrarySurfaceTests` lists the set in both directions, so adding one is a deliberate edit rather than a silent widening |
+| `shutil`, `argparse`, `textwrap`, `difflib`, `tempfile`, `hashlib`, `base64`, `string`, `functools`, … | Not ported. `StandardLibrarySurfaceTests` lists the set in both directions, so adding one is a deliberate edit rather than a silent widening |
 
 ## The browser add-on  (`src/Computerwelt.Playwright/`)
 
@@ -756,6 +780,7 @@ Upstream: `types/` (1.1 MB), `builtins/` (188 KB)
 Upstream: `modules/` — the permitted set and nothing more.
 
 - [x] `math`, `json`, `sys`, `typing`, `__future__`, `re`, `datetime`, `dataclasses`
+- [x] `random`, `csv`, and the rest of `json` — see "Extensions beyond Monty"
 - [x] `collections` (`Counter`, `defaultdict`, `namedtuple`, `OrderedDict`, `deque`)
 - [x] `itertools`
 - [x] `os` and `pathlib` — routed through this repo's `IFileSystem`, so Python and bash

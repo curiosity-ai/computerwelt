@@ -565,7 +565,7 @@ public sealed class PyInstance : PyObject
 }
 
 /// <summary>An iterator over a materialized sequence of values.</summary>
-public sealed class PyIterator : PyObject
+public class PyIterator : PyObject
 {
     private readonly Func<PyObject?> _advance;
 
@@ -613,7 +613,7 @@ public sealed class PyIterator : PyObject
     public override string Repr() => Describe?.Invoke() ?? $"<{TypeName} object>";
 
     /// <summary>Advances the iterator. Returns null when exhausted.</summary>
-    public PyObject? Next() => _advance();
+    public virtual PyObject? Next() => _advance();
 
     /// <inheritdoc />
     public override IEnumerable<PyObject>? Iterate()
