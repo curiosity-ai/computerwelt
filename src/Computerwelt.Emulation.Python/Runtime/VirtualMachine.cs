@@ -236,6 +236,9 @@ public sealed class VirtualMachine
             case PyCallable constructible when Computerwelt.Emulation.Python.Modules.DatetimeModule.TryConstruct(constructible, arguments, keywords) is { } built:
                 return built;
 
+            case PyExceptionType { Factory: { } factory }:
+                return factory(arguments);
+
             case PyExceptionType exceptionType:
             {
                 // A KeyError shows its key's repr rather than its text, which is what makes
