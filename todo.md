@@ -30,7 +30,7 @@ corpus does not reach. No host exception escapes to a script.
 `tests/Computerwelt.AgentTests/` — 153 covering the shell and Python operations a caller
 actually performs, plus upstream's 57 `python` command cases.
 
-**Extensions:** 17 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
+**Extensions:** 26 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
 have. They are kept apart from upstream's corpus deliberately — see below.
 
 **Current state — browser:** `Computerwelt.Playwright` is a separate, optional package that
@@ -93,6 +93,10 @@ off, which is the check that the port still stands on upstream's corpus alone.
 | `json` | `dump`/`load`, `default=`, `check_circular`, every decoder hook (`object_hook`, `object_pairs_hook`, `parse_float`, `parse_int`, `parse_constant`), `strict`, `JSONEncoder`/`JSONDecoder`, `cls=`, `json.decoder`/`json.encoder`, and `JSONDecodeError.msg/doc/pos/lineno/colno` — upstream rejects all of these by name. The decoder now follows the JSON number grammar and whitespace set, validates `\u` escapes digit by digit, refuses a BOM on text, detects the encoding of bytes, and caps nesting at the recursion limit instead of recursing on the host's stack | `json__hooks_and_classes.py` |
 | `random` | the whole module: a Mersenne Twister seeded as `_randommodule.c` seeds it, with `random.py`'s algorithms drawing in the same order, so **a seeded run reproduces CPython's numbers** — `random`, `getrandbits`, `randbytes`, `randrange`, `randint`, `choice`, `shuffle`, `sample` (with `counts`), `choices`, `uniform`, `triangular`, `gauss`, `normalvariate`, `lognormvariate`, `expovariate`, `vonmisesvariate`, `gammavariate`, `betavariate`, `paretovariate`, `weibullvariate`, `binomialvariate`, `getstate`/`setstate`, `Random`, `SystemRandom`. Every expected value in the fixture was produced by CPython 3.13 | `random__cpython_vectors.py`, `random__behaviour.py` |
 | `csv` | a port of `_csv.c` and `csv.py`: `reader`/`writer` (the same state machine and quoting decisions), all six `QUOTE_*` modes, dialects and the registry, `field_size_limit`, `DictReader`, `DictWriter`, `Sniffer` (`sniff`, `has_header`). Over any iterable of strings and anything with `write`, so no filesystem is needed. Expected values produced by CPython 3.13 | `csv__cpython_behaviour.py`, `csv__files.py` |
+| `functools`, `operator`, `string`, `textwrap`, `shlex`, `contextlib`, `statistics` | written **in Python** (`src/.../Modules/Source/*.py`, embedded and compiled in the sandbox on first import — see "Modules written in Python" below), and checked line for line against CPython 3.13. `functools`: `reduce`, `partial`, `wraps`, `lru_cache`, `cache`, `cmp_to_key`. `statistics`: exact rational arithmetic, so `mean`, `variance`, `stdev`, `quantiles`, `correlation`, `linear_regression`… agree with CPython to the last digit | `functools__behaviour.py`, `operator__behaviour.py`, `string_shlex_contextlib__behaviour.py`, `textwrap__behaviour.py`, `statistics__behaviour.py` |
+| `heapq`, `bisect`, `copy`, `time` | in C#. `heapq` sifts exactly as CPython does, so a printed heap has the same layout; `copy.deepcopy` keeps a memo (cycles) and honours `__copy__`/`__deepcopy__`; `time.sleep` **does not block** — it advances a per-run offset that every clock reading includes | `heapq_bisect_copy_time__behaviour.py` |
+| `hashlib`, `hmac`, `base64`, `binascii`, `uuid` | in C#, over the platform primitives. No `sha224`, `blake2`, `scrypt`, `uuid1` (MAC address) | `hashlib_hmac_base64_uuid__behaviour.py` |
+| core corrections | generator `send`/`throw`/`close`; settable function attributes and docstrings; `float.as_integer_ratio`; `int.from_bytes`; an **exact `math.fsum`** (it was a plain sum); **correctly rounded big-integer `/` and `float(int)`** (they truncated, and `10**400 / 10**399` overflowed); `raise … from None`; multi-argument `str(exc)`; `issubclass` with a tuple; `callable` on instances; `\Z` in `re` (it never matched) | `core__numbers_generators_misc.py` |
 | `__call__` | an instance whose class defines it is callable, and goes wherever a function goes. Upstream lists the dunder among the protocols it does not dispatch (`limitations/classes.md`) | `class__call.py` |
 
 Where the three newest modules deliberately differ from CPython:
@@ -115,6 +119,25 @@ Where the three newest modules deliberately differ from CPython:
   items for `choices`/`sample` — and raises `MemoryError` past it, because the instruction
   limit does not count work done inside a builtin. The module draws on host entropy when
   unseeded (and for `SystemRandom`), the one place the sandbox reads from outside itself.
+
+### Modules written in Python
+
+`Modules/Source/*.py` are embedded resources, compiled **inside the sandbox** on first import
+and cached for the run — so they are under the run's limits, reach exactly what any program
+reaches, and keep module state per tenant. A module appears in the importable set only by
+having a file there (or an entry in `StandardLibrary`), which keeps the surface a list somebody
+wrote. They are valid CPython as written, which is what made them checkable: each was run
+under CPython 3.13 and in the sandbox over the same script, and diffed.
+
+Choose Python for a module that is mostly logic over the object model (`textwrap`,
+`statistics`, `contextlib`); choose C# for loops a program may run a million times
+(`heapq`, `bisect`) or where the platform has the primitive (`hashlib`).
+
+Two interpreter limits shaped them: exception classes cannot be defined in Python source
+(`class E(ValueError)` does not inherit), so `statistics.StatisticsError` lives in a hidden
+`_hostexc` module; and `del obj.attr`, `str.translate` and `str.format_map` do not exist.
+Not ported for the same reason: `functools.total_ordering` (a dunder added to a class after
+it is created is not dispatched), `cached_property`, `singledispatch`, `statistics.NormalDist`.
 
 One engine sits behind `fnmatch`, `glob` and `Path.glob`, because CPython's three agree on
 what a pattern means and differ only in what they match it against. `os.walk` is iterative
@@ -148,7 +171,7 @@ Recorded, not fixed, because upstream defines the surface and this port follows 
 | Absent | Note |
 |---|---|
 | `open(..., newline='')` | Refused, though nothing here translates line endings and it would describe what already happens. `tests/monty-spec/open__fs.py` pins the refusal; binary mode is the way to ask for exact bytes |
-| `shutil`, `argparse`, `textwrap`, `difflib`, `tempfile`, `hashlib`, `base64`, `string`, `functools`, … | Not ported. `StandardLibrarySurfaceTests` lists the set in both directions, so adding one is a deliberate edit rather than a silent widening |
+| `shutil`, `argparse`, `difflib`, `tempfile`, `struct`, … | Not ported. `StandardLibrarySurfaceTests` lists the set in both directions, so adding one is a deliberate edit rather than a silent widening |
 
 ## The browser add-on  (`src/Computerwelt.Playwright/`)
 

@@ -10,6 +10,8 @@
   <ItemGroup>
     <!-- The Unicode character database, which the host runtime does not expose. -->
     <EmbeddedResource Include="Runtime/UnicodeData.bin" LogicalName="Computerwelt.Emulation.Python.Runtime.UnicodeData.bin" />
+    <!-- Standard modules written in Python, compiled inside the sandbox on first import. -->
+    <EmbeddedResource Include="Modules/Source/*.py" LogicalName="Computerwelt.Emulation.Python.Modules.Source.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

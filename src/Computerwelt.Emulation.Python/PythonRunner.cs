@@ -267,11 +267,6 @@ public sealed class PythonRunner
     /// </remarks>
     private void RegisterLibraries(VirtualMachine machine)
     {
-        if (Libraries.Count == 0)
-        {
-            return;
-        }
-
         var libraries = new Dictionary<string, PythonLibrary>(StringComparer.Ordinal);
 
         foreach (var library in Libraries)
@@ -282,9 +277,14 @@ public sealed class PythonRunner
 
         var timeProvider = TimeProvider ?? System.TimeProvider.System;
 
-        machine.ModuleResolver = name => libraries.TryGetValue(name, out var library)
-            ? library.Create(new PythonHostContext(name, machine, FileSystem, timeProvider))
-            : null;
+        // The host's libraries are asked first, so one can replace a standard module; the
+        // standard modules written in Python are the fallback before "no such module".
+        machine.ModuleResolver = name =>
+        {
+            var library = libraries.TryGetValue(name, out var host) ? host : Computerwelt.Emulation.Python.Modules.BuiltInSources.Find(name);
+
+            return library?.Create(new PythonHostContext(name, machine, FileSystem, timeProvider));
+        };
     }
 
     /// <summary>

@@ -73,6 +73,35 @@ public sealed class PyType : PyCallable
                     "Counter.fromkeys() is undefined.  Use Counter(iterable) instead.")));
         }
 
+        // `int.from_bytes(data, byteorder, signed=False)`.
+        if (Name == "int" && name == "from_bytes")
+        {
+            return new PyBuiltinFunction("from_bytes", (arguments, keywords) =>
+            {
+                var order = arguments.Length > 1 ? arguments[1] : keywords?.Entries.FirstOrDefault(static e => e.Key.Display() == "byteorder").Value;
+                var signed = (arguments.Length > 2 ? arguments[2] : keywords?.Entries.FirstOrDefault(static e => e.Key.Display() == "signed").Value)?.IsTruthy() ?? false;
+                var data = arguments.Length > 0 ? arguments[0] : throw new PyRaise(PyErrors.TypeError(
+                    "from_bytes() missing required argument 'bytes' (pos 1)"));
+
+                var raw = data switch
+                {
+                    PyBytes bytes => bytes.Value,
+                    _ => [.. (data.Iterate() ?? throw new PyRaise(PyErrors.TypeError(
+                        $"cannot convert '{data.TypeName}' object to bytes"))).Select(static b => (byte)((PyInt)b).Value)],
+                };
+
+                var little = order?.Display() switch
+                {
+                    "little" => true,
+                    "big" => false,
+                    null => false,
+                    _ => throw new PyRaise(PyErrors.ValueError("byteorder must be either 'little' or 'big'")),
+                };
+
+                return PyInt.From(new System.Numerics.BigInteger(raw, isUnsigned: !signed, isBigEndian: !little));
+            });
+        }
+
         // `bytes.fromhex(...)` and `dict.fromkeys(...)` are reached through the type, not
         // an instance.
         if (Name == "bytes" && name == "fromhex")

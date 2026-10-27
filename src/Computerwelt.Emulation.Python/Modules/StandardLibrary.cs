@@ -33,6 +33,9 @@ public static class StandardLibrary
     {
         var modules = Core(machine, timeProvider, arguments, standardInput);
 
+        // Time comes from the run's clock, so the module is built over it.
+        modules["time"] = TimeModule.Create(timeProvider ?? TimeProvider.System);
+
         // One cap, read from the run's limits, shared by everything that walks a tree —
         // so `glob`, `os.walk` and `Path.walk` cannot disagree about how deep is too deep.
         var maxDepth = machine.Limits.MaxDirectoryDepth;
@@ -91,6 +94,19 @@ public static class StandardLibrary
         ["json"] = JsonModule.Create(machine),
         ["random"] = RandomModule.Create(),
         ["csv"] = CsvModule.Create(machine),
+        ["heapq"] = HeapqModule.CreateHeapq(machine),
+        ["bisect"] = HeapqModule.CreateBisect(machine),
+        ["copy"] = CopyModule.Create(machine),
+        ["hashlib"] = HashingModules.CreateHashlib(),
+        ["hmac"] = HashingModules.CreateHmac(),
+        ["binascii"] = EncodingModules.CreateBinascii(),
+        ["base64"] = EncodingModules.CreateBase64(),
+        ["uuid"] = UuidModule.Create(),
+
+        // Exception classes the modules written in Python raise. Python source in this
+        // interpreter cannot define an exception class of its own, so the class lives here.
+        ["_hostexc"] = new PyModuleObject("_hostexc")
+            .Add("StatisticsError", HostExceptions.StatisticsError),
         ["asyncio"] = AsyncioModule.Create(machine),
         ["collections"] = SupportModules.CreateCollections(machine),
         ["itertools"] = SupportModules.CreateItertools(machine),
@@ -99,4 +115,12 @@ public static class StandardLibrary
         ["typing"] = SupportModules.CreateTyping(),
         ["__future__"] = new PyModuleObject("__future__").Add("annotations", PyNone.Instance),
     };
+}
+
+/// <summary>The exception classes that modules written in Python raise.</summary>
+internal static class HostExceptions
+{
+    /// <summary><c>statistics.StatisticsError</c>, a <c>ValueError</c>.</summary>
+    public static PyExceptionType StatisticsError { get; } =
+        PyExceptionType.DefineHostException("StatisticsError", PyExceptionType.ValueError);
 }

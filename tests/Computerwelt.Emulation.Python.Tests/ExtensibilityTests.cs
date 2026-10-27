@@ -177,7 +177,7 @@ public sealed class ExtensibilityTests
     [Fact]
     public void An_unregistered_name_is_still_not_importable()
     {
-        var result = Runner(Metrics()).Run("import statistics");
+        var result = Runner(Metrics()).Run("import argparse");
 
         Assert.False(result.Succeeded);
         Assert.Equal("ModuleNotFoundError", result.ExceptionType);

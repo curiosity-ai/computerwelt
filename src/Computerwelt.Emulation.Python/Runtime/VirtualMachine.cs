@@ -244,11 +244,15 @@ public sealed class VirtualMachine
                 // A KeyError shows its key's repr rather than its text, which is what makes
                 // `KeyError('x')` print as `'x'` and a missing key visible when it is blank.
                 var single = arguments.Length > 0 ? arguments[0] : null;
+
+                // With several arguments `str(e)` is the repr of the argument tuple.
                 var message = single is null
                     ? string.Empty
-                    : ReferenceEquals(exceptionType, PyExceptionType.KeyError) && arguments.Length == 1
-                        ? single.Repr()
-                        : single.Display();
+                    : arguments.Length > 1
+                        ? new PyTuple(arguments).Repr()
+                        : ReferenceEquals(exceptionType, PyExceptionType.KeyError)
+                            ? single.Repr()
+                            : single.Display();
 
                 return new PyException(exceptionType, message, arguments);
             }
@@ -930,7 +934,7 @@ public sealed class VirtualMachine
     /// Finds a handler for <paramref name="exception"/> in the frame's block stack and
     /// transfers control to it. Returns false when the frame has no handler.
     /// </summary>
-    private static bool Unwind(Frame frame, PyException exception)
+    internal static bool Unwind(Frame frame, PyException exception)
     {
         while (frame.Blocks.Count > 0)
         {
@@ -1890,15 +1894,20 @@ public sealed class VirtualMachine
         }
 
         PyException? cause = null;
+        var suppress = false;
 
         if (argumentCount == 2)
         {
-            cause = ToException(frame.Pop());
+            // `from None` is the one cause that is not an exception: it hides the context.
+            var given = frame.Pop();
+            suppress = given is PyNone;
+            cause = suppress ? null : ToException(given);
         }
 
         var exception = ToException(frame.Pop());
         exception.Cause = cause;
         exception.Context ??= frame.CurrentException;
+        exception.SuppressContext = suppress || exception.SuppressContext;
 
         throw new PyRaise(exception);
     }

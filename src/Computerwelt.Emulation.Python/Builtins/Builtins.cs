@@ -13,6 +13,18 @@ namespace Computerwelt.Emulation.Python.Builtins;
 /// </remarks>
 public static class BuiltinNamespace
 {
+    /// <summary><c>issubclass(candidate, classes)</c>, where <c>classes</c> may be a tuple of them.</summary>
+    private static bool IsSubclass(PyObject candidate, PyObject classes) => (candidate, classes) switch
+    {
+        (_, PyTuple options) => options.Items.Any(option => IsSubclass(candidate, option)),
+        (PyExceptionType left, PyExceptionType right) => left.IsSubclassOf(right),
+        (PyType left, PyType right) => ReferenceEquals(left, right)
+            || (ReferenceEquals(left, TypeRegistry.Bool) && ReferenceEquals(right, TypeRegistry.Int))
+            || ReferenceEquals(right, TypeRegistry.Object),
+        (PyClass left, PyClass right) => ReferenceEquals(left, right),
+        _ => false,
+    };
+
     /// <summary>Creates the builtin namespace for a machine.</summary>
     public static PyDict Create(VirtualMachine machine)
     {
@@ -563,16 +575,7 @@ public static class BuiltinNamespace
         DefineArity("isinstance", 2, 2, static arguments =>
             PyBool.Of(TypeRegistry.IsInstance(arguments[0], arguments[1])));
 
-        DefineArity("issubclass", 2, 2, static arguments => PyBool.Of(
-            (arguments[0], arguments[1]) switch
-            {
-                (PyExceptionType left, PyExceptionType right) => left.IsSubclassOf(right),
-                (PyType left, PyType right) => ReferenceEquals(left, right)
-                    || (ReferenceEquals(left, TypeRegistry.Bool) && ReferenceEquals(right, TypeRegistry.Int))
-                    || ReferenceEquals(right, TypeRegistry.Object),
-                (PyClass left, PyClass right) => ReferenceEquals(left, right),
-                _ => false,
-            }));
+        DefineArity("issubclass", 2, 2, static arguments => PyBool.Of(IsSubclass(arguments[0], arguments[1])));
 
         DefineArity("iter", 1, 2, arguments =>
         {
@@ -719,7 +722,7 @@ public static class BuiltinNamespace
         DefineExact("hasattr", 2, arguments =>
             PyBool.Of(Runtime.Attributes.TryGet(machine, arguments[0], Arity.AttributeName(arguments[1])) is not null));
 
-        DefineArity("callable", 1, 1, static arguments => PyBool.Of(arguments[0] is PyCallable or PyExceptionType));
+        DefineArity("callable", 1, 1, static arguments => PyBool.Of(arguments[0] is PyCallable or PyExceptionType || (arguments[0] is PyInstance callableInstance && callableInstance.Dunder("__call__") is not null)));
 
         DefineArity("format", 1, 2, static arguments =>
             new PyStr(StringFormatter.Format(arguments[0], arguments.Length > 1 ? arguments[1].Display() : string.Empty)));
@@ -1214,7 +1217,7 @@ public static class Conversions
                 return new PyFloat(flag.Value ? 1 : 0);
 
             case PyInt integer:
-                return new PyFloat((double)integer.Value);
+                return new PyFloat(Numbers.ToDouble(integer.Value));
 
             case PyFloat number:
                 return number;
