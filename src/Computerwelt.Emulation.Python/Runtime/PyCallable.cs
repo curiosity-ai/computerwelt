@@ -69,7 +69,26 @@ public sealed class PyFunction : PyCallable
     /// `__init__ = recorder.record` does — keeps the receiver it was bound to.
     /// </remarks>
     public PyFunction Bind(PyObject instance) =>
-        BoundSelf is not null ? this : new(Code, Closure, Globals, Defaults) { BoundSelf = instance };
+        BoundSelf is not null ? this : new(Code, Closure, Globals, Defaults) { BoundSelf = instance, Fields = Fields };
+
+    /// <summary>
+    /// Attributes a program has set on the function — <c>__wrapped__</c>, a renamed
+    /// <c>__name__</c>, a counter a decorator keeps. Shared with the bound copies, so setting
+    /// one through an instance is seen through the class.
+    /// </summary>
+    internal Dictionary<string, PyObject> Fields { get; init; } = new(StringComparer.Ordinal);
+
+    /// <inheritdoc />
+    public override PyObject? GetAttribute(string name) =>
+        Fields.GetValueOrDefault(name)
+        ?? (name == "__doc__" ? (Code.Doc is { } doc ? new PyStr(doc) : PyNone.Instance) : base.GetAttribute(name));
+
+    /// <inheritdoc />
+    public override bool SetAttribute(string name, PyObject value)
+    {
+        Fields[name] = value;
+        return true;
+    }
 }
 
 /// <summary>A function implemented in C#.</summary>

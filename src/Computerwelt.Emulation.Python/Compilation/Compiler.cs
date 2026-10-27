@@ -1308,6 +1308,13 @@ public sealed class Compiler
             compiler.EmitStore("__doc__", line);
         }
 
+        // A function's leading string literal is its docstring: kept on the code object so
+        // `__doc__` can answer, and still compiled as the harmless expression it is.
+        if (!isClassBody && body is [ExpressionStatement { Value: Literal { Value: string functionDoc } }, ..])
+        {
+            compiler._code.Doc = functionDoc;
+        }
+
         compiler.CompileStatements(body);
         compiler.Emit(OpCode.LoadConst, compiler._code.AddConstant(PyNone.Instance), line);
         compiler.Emit(OpCode.Return, 0, line);

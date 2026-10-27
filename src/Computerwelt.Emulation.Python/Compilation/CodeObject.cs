@@ -21,6 +21,9 @@ public sealed class CodeObject
     /// <summary>The function or module name, as tracebacks report it.</summary>
     public string Name { get; }
 
+    /// <summary>The docstring, when the body opens with a string literal.</summary>
+    public string? Doc { get; set; }
+
     /// <summary>The source file name.</summary>
     public string FileName { get; }
 

@@ -1552,6 +1552,52 @@ public static class BuiltinMethods
         "is_integer" => Method(name, receiver, static (self, _, _) =>
             PyBool.Of(double.IsInteger(((PyFloat)self).Value))),
 
+        // The exact fraction a float is: a power-of-two denominator, in lowest terms.
+        "as_integer_ratio" => Method(name, receiver, static (self, _, _) =>
+        {
+            var value = ((PyFloat)self).Value;
+
+            if (double.IsNaN(value))
+            {
+                throw new PyRaise(PyErrors.ValueError("cannot convert NaN to integer ratio"));
+            }
+
+            if (double.IsInfinity(value))
+            {
+                throw new PyRaise(new PyException(
+                    PyExceptionType.OverflowError, "cannot convert Infinity to integer ratio"));
+            }
+
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            var exponent = (int)((bits >> 52) & 0x7ff);
+            var mantissa = bits & 0xfffffffffffffL;
+
+            if (exponent == 0)
+            {
+                exponent++;
+            }
+            else
+            {
+                mantissa |= 1L << 52;
+            }
+
+            exponent -= 1075;
+            System.Numerics.BigInteger numerator = value < 0 ? -mantissa : mantissa;
+            System.Numerics.BigInteger denominator = 1;
+
+            if (exponent > 0)
+            {
+                numerator <<= exponent;
+            }
+            else
+            {
+                denominator <<= -exponent;
+            }
+
+            var divisor = System.Numerics.BigInteger.GreatestCommonDivisor(numerator, denominator);
+            return new PyTuple([PyInt.From(numerator / divisor), PyInt.From(denominator / divisor)]);
+        }),
+
         _ => null,
     };
 }

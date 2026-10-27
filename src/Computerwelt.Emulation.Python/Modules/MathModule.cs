@@ -444,7 +444,10 @@ public static class MathModule
         });
 
         module.Add("fsum", static arguments =>
-            new PyFloat(VirtualMachine.RequireIterable(arguments[0]).Sum(ToDouble)));
+        {
+            Arity.Exact("fsum", arguments, 1);
+            return new PyFloat(Fsum(VirtualMachine.RequireIterable(arguments[0]).Select(ToDouble)));
+        });
 
         module.Add("copysign", static arguments =>
             new PyFloat(Math.CopySign(ToDouble(arguments[0]), ToDouble(arguments[1]))));
@@ -804,9 +807,115 @@ public static class MathModule
         return PyInt.From(new BigInteger(value));
     }
 
+    /// <summary>
+    /// Shewchuk's exact floating-point summation, as <c>math.fsum</c> computes it: partial
+    /// sums that each carry the rounding error of the one before, so the result is the
+    /// correctly rounded sum of the inputs rather than of their running totals.
+    /// </summary>
+    private static double Fsum(IEnumerable<double> values)
+    {
+        var partials = new List<double>();
+        double special = 0.0, infinities = 0.0;
+
+        foreach (var value in values)
+        {
+            var x = value;
+
+            if (!double.IsFinite(x))
+            {
+                special += x;
+
+                if (double.IsInfinity(x))
+                {
+                    infinities += x;
+                }
+
+                continue;
+            }
+
+            var kept = 0;
+
+            for (var j = 0; j < partials.Count; j++)
+            {
+                var y = partials[j];
+
+                if (Math.Abs(x) < Math.Abs(y))
+                {
+                    (x, y) = (y, x);
+                }
+
+                var high = x + y;
+                var low = y - (high - x);
+
+                if (low != 0.0)
+                {
+                    partials[kept++] = low;
+                }
+
+                x = high;
+            }
+
+            partials.RemoveRange(kept, partials.Count - kept);
+
+            if (x != 0.0)
+            {
+                if (!double.IsFinite(x))
+                {
+                    throw new PyRaise(new PyException(PyExceptionType.OverflowError, "intermediate overflow in fsum"));
+                }
+
+                partials.Add(x);
+            }
+        }
+
+        if (special != 0.0 || double.IsNaN(special))
+        {
+            return double.IsNaN(infinities)
+                ? throw new PyRaise(PyErrors.ValueError("-inf + inf in fsum"))
+                : special;
+        }
+
+        var n = partials.Count;
+        var sum = 0.0;
+
+        if (n > 0)
+        {
+            sum = partials[--n];
+            var low = 0.0;
+
+            // Sum from the top; stop at the first partial that leaves a nonzero error.
+            while (n > 0)
+            {
+                var x = sum;
+                var y = partials[--n];
+                sum = x + y;
+                low = y - (sum - x);
+
+                if (low != 0.0)
+                {
+                    break;
+                }
+            }
+
+            // Half-way cases round to even, which needs the next partial's sign.
+            if (n > 0 && ((low < 0.0 && partials[n - 1] < 0.0) || (low > 0.0 && partials[n - 1] > 0.0)))
+            {
+                var y = low * 2.0;
+                var x = sum + y;
+
+                if (y == x - sum)
+                {
+                    sum = x;
+                }
+            }
+        }
+
+        return sum;
+    }
+
     private static double ToDouble(PyObject value) => value switch
     {
-        PyInt integer => (double)integer.Value,
+        PyInt integer => Numbers.ToDouble(integer.Value),
         PyFloat number => number.Value,
         _ => throw new PyRaise(PyErrors.TypeError($"must be real number, not {value.TypeName}")),
     };

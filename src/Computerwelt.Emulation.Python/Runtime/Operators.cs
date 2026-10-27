@@ -505,6 +505,13 @@ public static class Operators
             return JoinPaths(left, right);
         }
 
+        if (left is PyInt whole && right is PyInt divisor)
+        {
+            return divisor.Value.IsZero
+                ? throw new PyRaise(PyErrors.ZeroDivisionError("division by zero"))
+                : new PyFloat(Numbers.TrueDivide(whole.Value, divisor.Value));
+        }
+
         if (!TryNumbers(left, right, out var a, out var b, out _))
         {
             throw new PyRaise(PyErrors.TypeError(
@@ -990,16 +997,24 @@ public static class Operators
 
         switch (left)
         {
-            case PyInt integer: a = (double)integer.Value; break;
+            case PyInt integer: a = Numbers.ToDoubleOrInfinity(integer.Value); break;
             case PyFloat number: a = number.Value; useFloat = true; break;
             default: return false;
         }
 
         switch (right)
         {
-            case PyInt integer: b = (double)integer.Value; break;
+            case PyInt integer: b = Numbers.ToDoubleOrInfinity(integer.Value); break;
             case PyFloat number: b = number.Value; useFloat = true; break;
             default: return false;
+        }
+
+        // Two integers never meet in a float, so only a mixed operation can overflow one.
+        if (useFloat
+            && ((left is PyInt && double.IsInfinity(a)) || (right is PyInt && double.IsInfinity(b))))
+        {
+            throw new PyRaise(new PyException(
+                PyExceptionType.OverflowError, "int too large to convert to float"));
         }
 
         return true;

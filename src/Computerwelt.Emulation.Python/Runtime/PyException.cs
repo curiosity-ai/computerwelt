@@ -26,6 +26,9 @@ public sealed class PyException : PyObject
     /// <summary>The exception being handled when this one was raised (<c>__context__</c>).</summary>
     public PyException? Context { get; set; }
 
+    /// <summary>True after <c>raise ... from None</c>, which hides <see cref="Context"/> in a traceback.</summary>
+    public bool SuppressContext { get; set; }
+
     /// <summary>The explicit <c>raise ... from ...</c> cause.</summary>
     public PyException? Cause { get; set; }
 
@@ -56,6 +59,7 @@ public sealed class PyException : PyObject
         "args" => new PyTuple([.. Arguments]),
         "__context__" => (PyObject?)Context ?? PyNone.Instance,
         "__cause__" => (PyObject?)Cause ?? PyNone.Instance,
+        "__suppress_context__" => PyBool.Of(SuppressContext || Cause is not null),
         _ => Fields is not null && Fields.TryGetValue(name, out var field) ? field : null,
     };
 
@@ -72,7 +76,7 @@ public sealed class PyException : PyObject
             builder.Append(cause.FormatTraceback(fileName));
             builder.Append("\nThe above exception was the direct cause of the following exception:\n\n");
         }
-        else if (Context is { } context)
+        else if (Context is { } context && !SuppressContext)
         {
             builder.Append(context.FormatTraceback(fileName));
             builder.Append("\nDuring handling of the above exception, another exception occurred:\n\n");
@@ -321,6 +325,9 @@ public sealed class PyExceptionType : PyObject
     /// <summary><c>KeyboardInterrupt</c>.</summary>
     public static PyExceptionType KeyboardInterrupt { get; } = Define("KeyboardInterrupt", BaseException);
 
+    /// <summary><c>GeneratorExit</c>, thrown into a generator that is being closed.</summary>
+    public static PyExceptionType GeneratorExit { get; } = Define("GeneratorExit", BaseException);
+
     /// <summary><c>SystemExit</c>.</summary>
     public static PyExceptionType SystemExit { get; } = Define("SystemExit", BaseException);
 
@@ -405,6 +412,9 @@ public static class PyErrors
 
         return new PyException(PyExceptionType.KeyError, text, [key]);
     }
+
+    /// <summary>Creates an <c>OverflowError</c>.</summary>
+    public static PyException OverflowErrorFor(string message) => new(PyExceptionType.OverflowError, message);
 
     /// <summary>Creates a <c>ZeroDivisionError</c>.</summary>
     public static PyException ZeroDivisionError(string message) =>

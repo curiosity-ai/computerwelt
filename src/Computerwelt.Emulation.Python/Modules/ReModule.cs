@@ -650,13 +650,8 @@ public static class ReModule
                 if (c == '\\' && i + 1 < pattern.Length)
                 {
                     // `\Z` is `\z` in .NET; every other escape passes through.
-                    builder.Append(c).Append(pattern[i + 1] == 'Z' ? 'z' : pattern[++i]);
-
-                    if (pattern[i] == 'Z')
-                    {
-                        i++;
-                    }
-
+                    i++;
+                    builder.Append(c).Append(pattern[i] == 'Z' && !inClass ? 'z' : pattern[i]);
                     continue;
                 }
 
