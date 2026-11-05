@@ -28,6 +28,30 @@ internal sealed class PyBrowser : PlaywrightObject
     {
         _name = name;
         _browser = browser;
+
+        Adopt();
+    }
+
+    /// <summary>
+    /// Picks up the contexts an earlier run of this tenant left open - once per run, by the first
+    /// browser the script launches - so <c>browser.contexts</c> and <c>context.pages</c> show them.
+    /// </summary>
+    private void Adopt()
+    {
+        if (Bridge.Adopted || !Bridge.Scope.Options.KeepContextsBetweenRuns)
+        {
+            return;
+        }
+
+        Bridge.Adopted = true;
+
+        foreach (var context in Bridge.Scope.Contexts)
+        {
+            var wrapper = new PyBrowserContext(Bridge, context, this);
+
+            wrapper.AdoptPages();
+            Bridge.Contexts.Add(wrapper);
+        }
     }
 
     public override string TypeName => "Browser";
@@ -65,7 +89,7 @@ internal sealed class PyBrowser : PlaywrightObject
         {
             arguments.String("reason");
             arguments.Done(0);
-            Bridge.ReleaseAll();
+            Bridge.CloseAll();
         }),
 
         "new_browser_cdp_session" or "start_tracing" or "stop_tracing" or "bind" or "unbind" =>
@@ -374,6 +398,18 @@ internal sealed class PyBrowserContext : PlaywrightObject
 
         _ => null,
     };
+
+    /// <summary>Wraps the pages an earlier run left open in this context.</summary>
+    public void AdoptPages()
+    {
+        foreach (var page in _context.Pages)
+        {
+            if (!page.IsClosed)
+            {
+                _pages.Add(new PyPage(Bridge, page, this));
+            }
+        }
+    }
 
     /// <summary>Opens a page under the context's page cap.</summary>
     public PyPage NewPage()

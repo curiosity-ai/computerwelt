@@ -83,6 +83,30 @@ public sealed record PlaywrightScopeOptions
     /// </para>
     /// </remarks>
     public string? ProfileDirectory { get; init; }
+
+    /// <summary>
+    /// Whether the contexts a run opens stay open when the run ends, for the tenant's next run to pick up.
+    /// Off by default: a context is closed when its run ends, whether or not the script remembered to.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// On, the end of a run - and <c>p.stop()</c>, and the exit of a <c>with sync_playwright()</c> block -
+    /// only <i>detaches</i> the run from its contexts: the browser, its pages and what they were showing are
+    /// still there. The next run that calls <c>launch()</c> finds them in <c>browser.contexts</c> and
+    /// <c>context.pages</c>, so a session of several scripts - open a page, look, click, look again - costs one
+    /// browser launch and one page load rather than one each. A context closes only when the tenant says so
+    /// (<c>browser.close()</c>, <c>context.close()</c>, <c>page.close()</c>) or when the host does
+    /// (<see cref="PlaywrightScope.DisposeAsync"/>), which is what the host's idle sweep is for: nothing here
+    /// ends a session that nobody comes back to.
+    /// </para>
+    /// <para>
+    /// The contexts count against <see cref="MaxContexts"/> for as long as they stay open, so a script that
+    /// opens a new one every run reaches the cap; <c>browser.contexts[0]</c> is how it picks up the one it
+    /// already has. A page's <c>console_messages()</c>, <c>page_errors()</c> and <c>requests()</c> start again
+    /// in each run: they are the run's own record, not the page's.
+    /// </para>
+    /// </remarks>
+    public bool KeepContextsBetweenRuns { get; init; }
 }
 
 /// <summary>What a capture was.</summary>
@@ -137,6 +161,7 @@ public sealed class PlaywrightScope : IAsyncDisposable
     private readonly HashSet<string> _profilesInUse = new(StringComparer.Ordinal);
     private bool _disposed;
     private long _lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
+    private int _activeRuns;
 
     internal PlaywrightScope(PlaywrightSession session, PlaywrightScopeOptions options)
     {
@@ -177,8 +202,27 @@ public sealed class PlaywrightScope : IAsyncDisposable
     /// <summary>Whether the scope has been disposed, after which it opens nothing.</summary>
     public bool IsDisposed => _disposed;
 
-    /// <summary>When this tenant last opened a context, for a host's idle sweep.</summary>
+    /// <summary>When this tenant last opened a context or a run of its started or ended, for a host's idle sweep.</summary>
     public DateTimeOffset LastActivity => new(Interlocked.Read(ref _lastActivityTicks), TimeSpan.Zero);
+
+    /// <summary>
+    /// How many runs of this tenant are using the browser right now - a program that imported <c>playwright</c>
+    /// and has not finished. A host's idle sweep leaves a scope alone while this is above zero, however long ago
+    /// <see cref="LastActivity"/> was.
+    /// </summary>
+    public int ActiveRuns => Volatile.Read(ref _activeRuns);
+
+    internal void RunStarted()
+    {
+        Interlocked.Increment(ref _activeRuns);
+        Interlocked.Exchange(ref _lastActivityTicks, DateTimeOffset.UtcNow.UtcTicks);
+    }
+
+    internal void RunEnded()
+    {
+        Interlocked.Decrement(ref _activeRuns);
+        Interlocked.Exchange(ref _lastActivityTicks, DateTimeOffset.UtcNow.UtcTicks);
+    }
 
     /// <summary>The contexts this tenant has open right now.</summary>
     public IReadOnlyList<IBrowserContext> Contexts
