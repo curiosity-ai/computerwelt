@@ -91,6 +91,24 @@ await using var scope = session.CreateScope(new PlaywrightScopeOptions
 });
 ```
 
+`KeepContextsBetweenRuns = true` goes one step further than the profile: the contexts and pages a run
+opened are still open when it ends, so a tenant's next script finds the page it left. The end of the run,
+`p.stop()` and the exit of a `with sync_playwright()` block only detach; `browser.close()`,
+`context.close()` and `page.close()` close for real, as does disposing the scope. The next run picks them
+up through `browser.contexts` and `context.pages`:
+
+```python
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    page    = context.pages[0] if context.pages else context.new_page()
+```
+
+Nothing ends a session nobody comes back to, so the host sweeps: `PlaywrightScope.LastActivity` moves when
+a context opens and when a run starts or ends, and `ActiveRuns` says whether a script is using the browser
+now. Kept contexts count against `MaxContexts`, and a page's `console_messages()` / `page_errors()` /
+`requests()` start again in each run.
+
 A sandbox built once whose browser may come and go later registers a resolver instead —
 `WithPlaywright(() => current ?? throw new PlaywrightUnavailableException("the browser is off"))`
 — which is asked on each run's first `import playwright`; what it throws becomes the program's

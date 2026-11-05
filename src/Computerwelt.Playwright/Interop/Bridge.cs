@@ -49,11 +49,16 @@ internal sealed class Bridge
     /// <summary>What the browser may reach.</summary>
     public NavigationPolicy Policy => Scope.Policy;
 
-    /// <summary>Every browser context this run opened, so all of them can be closed at once.</summary>
+    /// <summary>Every browser context this run opened or picked up, so all of them can be closed at once.</summary>
     public List<Api.PyBrowserContext> Contexts { get; } = [];
 
+    /// <summary>Whether the contexts an earlier run left open have been wrapped for this one.</summary>
+    public bool Adopted { get; set; }
+
     /// <summary>
-    /// Closes every context this run opened and hands its slot back to the session.
+    /// Lets go of what this run has open: closes it, or - for a scope that keeps its contexts between
+    /// runs (<see cref="PlaywrightScopeOptions.KeepContextsBetweenRuns"/>) - only stops tracking it, leaving
+    /// the contexts and their pages for the tenant's next run.
     /// </summary>
     /// <remarks>
     /// Reached three ways, and the third is the one that matters: <c>p.stop()</c>, the exit
@@ -62,6 +67,22 @@ internal sealed class Bridge
     /// which is the case a shared browser needs protecting from.
     /// </remarks>
     public void ReleaseAll()
+    {
+        if (Scope.Options.KeepContextsBetweenRuns)
+        {
+            Contexts.Clear();
+            return;
+        }
+
+        CloseAll();
+    }
+
+    /// <summary>
+    /// Closes every context this run has, including the ones it picked up from an earlier run, and hands
+    /// the slots back to the session. What <c>browser.close()</c> asks for, and what ends a run of a scope
+    /// that does not keep its contexts.
+    /// </summary>
+    public void CloseAll()
     {
         // Copied first: closing a context takes it out of this list.
         foreach (var context in Contexts.ToArray())

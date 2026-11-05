@@ -175,7 +175,10 @@ public sealed class PlaywrightLibrary
     private Bridge BridgeFor(PythonHostContext context) =>
         _bridges.GetValue(context.Machine, _ =>
         {
-            var bridge = new Bridge(context, ResolveScope(), _cancellationToken);
+            var scope  = ResolveScope();
+            var bridge = new Bridge(context, scope, _cancellationToken);
+
+            scope.RunStarted();
 
             // The safety net. A program that used `with sync_playwright()` has already given
             // its contexts back by the time this runs and it does nothing; a program that
@@ -183,7 +186,11 @@ public sealed class PlaywrightLibrary
             // Without this the only thing releasing a shared browser's contexts would be the
             // script remembering to, and a script that forgot is the case the browser needs
             // protecting from.
-            context.Machine.WhenRunCompleted(bridge.ReleaseAll);
+            context.Machine.WhenRunCompleted(() =>
+            {
+                bridge.ReleaseAll();
+                scope.RunEnded();
+            });
 
             return bridge;
         });
