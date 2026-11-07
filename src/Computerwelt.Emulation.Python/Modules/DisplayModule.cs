@@ -98,7 +98,7 @@ public static class DisplayModule
     {
         // Binary images travel base64-encoded, as in a Jupyter message.
         (_, PyBytes bytes) => Convert.ToBase64String(bytes.Value),
-        ("application/json", not PyStr) => machine.Modules.TryGetValue("json", out var json)
+        ("application/json", not PyStr) => machine.Import("json") is { } json
             && json.GetAttribute("dumps") is { } dumps
             ? machine.Call(dumps, [data]).Display()
             : data.Repr(),

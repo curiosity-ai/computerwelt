@@ -789,7 +789,7 @@ internal static class PdIO
             };
         }
 
-        if (indent > 0 && PdRuntime.Current!.Machine.Modules.TryGetValue("json", out var json))
+        if (indent > 0 && PdRuntime.Current!.Machine.Import("json") is { } json)
         {
             var runtime = PdRuntime.Current;
             var parsed = runtime.Call(json.GetAttribute("loads")!, new PyStr(text));
@@ -893,7 +893,7 @@ internal static class PdIO
             text = ReadSource(source, arguments.Str("encoding"));
         }
 
-        var loads = runtime.Machine.Modules["json"].GetAttribute("loads")!;
+        var loads = runtime.Machine.Import("json").GetAttribute("loads")!;
         var typ = arguments.Str("typ", "frame");
         var orient = arguments.Str("orient");
         var convertAxes = arguments.Bool("convert_axes", true);

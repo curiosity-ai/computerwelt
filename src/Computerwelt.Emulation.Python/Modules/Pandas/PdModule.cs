@@ -337,7 +337,7 @@ public static class PdModule
     private static PyObject Timedelta(PdArgs arguments)
     {
         var runtime = PdRuntime.Current!;
-        var type = runtime.Machine.Modules["datetime"].GetAttribute("timedelta")!;
+        var type = runtime.Machine.Import("datetime").GetAttribute("timedelta")!;
         var keywords = new PyDict();
 
         foreach (var name in new[] { "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "weeks" })
@@ -658,7 +658,7 @@ internal sealed class PdTimestampType : PyCallable, DatetimeModule.IPyClassLike
 
         if (input is PyStr { Value: "now" or "today" })
         {
-            var now = _runtime.Machine.Modules["datetime"].GetAttribute("datetime") is { } type && Attributes.TryGet(_runtime.Machine, type, "now") is { } method
+            var now = _runtime.Machine.Import("datetime").GetAttribute("datetime") is { } type && Attributes.TryGet(_runtime.Machine, type, "now") is { } method
                 ? _runtime.Call(method)
                 : throw Pd.ValueError("the clock is not available");
             return PdTimestamp.From(now)!;

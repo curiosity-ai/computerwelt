@@ -1297,7 +1297,7 @@ internal sealed partial class PdFrame
         else if (arguments.Str("regex") is { } pattern)
         {
             var runtime = PdRuntime.Current!;
-            var search = runtime.Machine.Modules["re"].GetAttribute("search")!;
+            var search = runtime.Machine.Import("re").GetAttribute("search")!;
             positions = Enumerable.Range(0, axis.Count).Where(i => runtime.Call(search, new PyStr(pattern), new PyStr(Pd.Text(axis[i]))) is not PyNone);
         }
         else

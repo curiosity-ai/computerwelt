@@ -241,7 +241,7 @@ internal sealed class PdTimestamp : PyObject, IPyOperand
 
     private static PyObject? ParseExact(string raw, string format)
     {
-        if (PdRuntime.Current is not { } runtime || !runtime.Machine.Modules.TryGetValue("datetime", out var module)
+        if (PdRuntime.Current is not { } runtime || runtime.Machine.Import("datetime") is not { } module
             || module.GetAttribute("datetime") is not { } type
             || Attributes.TryGet(runtime.Machine, type, "strptime") is not { } strptime)
         {

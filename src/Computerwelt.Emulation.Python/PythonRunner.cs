@@ -133,17 +133,15 @@ public sealed class PythonRunner
     internal VirtualMachine CreateMachine(string fileName)
     {
         var globals = new PyDict();
-        var builtins = new PyDict();
+        // Sized for the builtin names and the exception classes, so filling it never resizes.
+        var builtins = new PyDict(256);
 
         // The builtins close over the machine — `print` writes to its buffers, `sorted`
         // calls back into it — so the namespace is filled after the machine exists rather
         // than passed to its constructor.
         var machine = new VirtualMachine(globals, builtins, Limits);
 
-        foreach (var (key, value) in BuiltinNamespace.Create(machine).Entries)
-        {
-            builtins.Set(key, value);
-        }
+        BuiltinNamespace.Populate(machine, builtins);
 
         // One stream object serves both `sys.stdin` and `input()`, so a program that mixes
         // them reads each line once rather than seeing the input twice.

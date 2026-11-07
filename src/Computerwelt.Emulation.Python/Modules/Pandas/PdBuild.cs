@@ -370,7 +370,7 @@ internal static class PdBuild
             {
                 if (regex && from is PyStr pattern && current is PyStr text && runtime is not null)
                 {
-                    var sub = runtime.Machine.Modules["re"].GetAttribute("sub")!;
+                    var sub = runtime.Machine.Import("re").GetAttribute("sub")!;
                     var replaced = runtime.Call(sub, pattern, to is PyStr ? to : new PyStr(to.Display()), text);
 
                     if (!replaced.PyEquals(text))

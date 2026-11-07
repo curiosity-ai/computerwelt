@@ -255,10 +255,29 @@ public sealed class VirtualMachine
     /// one run yields one object — module state a program mutates is seen by every importer
     /// of it, as in CPython — while a fresh run starts from a fresh module.
     /// </remarks>
+    /// <summary>What the standard modules of this run are built over, when they are built.</summary>
+    public Computerwelt.Emulation.Python.Modules.StandardLibraryContext? StandardLibrary { get; set; }
+
+    /// <summary>
+    /// The module <paramref name="name"/>, built if this run has not imported it yet — for
+    /// host code that needs a module (<c>json</c>, <c>re</c>) the program may never import.
+    /// </summary>
+    public PyObject Import(string name) =>
+        Modules.TryGetValue(name, out var module)
+            ? module
+            : ResolveModule(name) ?? throw new PyRaise(PyErrors.ModuleNotFound(name));
+
     private PyObject? ResolveModule(string name)
     {
         if (ModuleResolver is not { } resolver)
         {
+            // A machine built without a runner still has the standard library.
+            if (Computerwelt.Emulation.Python.Modules.StandardLibrary.CreateOnDemand(this, name) is { } standard)
+            {
+                Modules[name] = standard;
+                return standard;
+            }
+
             return null;
         }
 

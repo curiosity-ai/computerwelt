@@ -35,9 +35,11 @@ public static class BuiltinNamespace
     };
 
     /// <summary>Creates the builtin namespace for a machine.</summary>
-    public static PyDict Create(VirtualMachine machine)
+    public static PyDict Create(VirtualMachine machine) => Populate(machine, new PyDict());
+
+    /// <summary>Fills <paramref name="builtins"/> — the machine's own namespace, typically — with the builtins.</summary>
+    public static PyDict Populate(VirtualMachine machine, PyDict builtins)
     {
-        var builtins = new PyDict();
 
         void Define(string name, Func<PyObject[], PyDict?, PyObject> implementation) =>
             builtins.Set(new PyStr(name), new PyBuiltinFunction(name, implementation));

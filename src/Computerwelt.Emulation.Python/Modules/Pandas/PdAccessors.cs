@@ -51,7 +51,7 @@ internal sealed class PdStringAccessor : PyObject
     }
 
     private static PyObject Re(string name) =>
-        PdRuntime.Current!.Machine.Modules["re"].GetAttribute(name)!;
+        PdRuntime.Current!.Machine.Import("re").GetAttribute(name)!;
 
     private static PyObject Compile(string pattern, bool caseSensitive, int flags = 0)
     {
@@ -196,7 +196,7 @@ internal sealed class PdStringAccessor : PyObject
             }),
             "normalize" => M(["form"], a => Each(s =>
             {
-                var normalize = PdRuntime.Current!.Machine.Modules["unicodedata"].GetAttribute("normalize")!;
+                var normalize = PdRuntime.Current!.Machine.Import("unicodedata").GetAttribute("normalize")!;
                 return PdRuntime.Current.Call(normalize, a.Required("form"), new PyStr(s));
             })),
             _ => null,

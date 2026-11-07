@@ -397,8 +397,22 @@ internal static class SequenceOps
 /// </remarks>
 public class PyDict : PyObject
 {
-    private readonly Dictionary<PyKey, int> _index = [];
-    private readonly List<KeyValuePair<PyObject, PyObject>> _entries = [];
+    private readonly Dictionary<PyKey, int> _index;
+    private readonly List<KeyValuePair<PyObject, PyObject>> _entries;
+
+    /// <summary>Creates an empty dict.</summary>
+    public PyDict()
+    {
+        _index = [];
+        _entries = [];
+    }
+
+    /// <summary>Creates an empty dict sized for <paramref name="capacity"/> entries, so filling it never resizes.</summary>
+    public PyDict(int capacity)
+    {
+        _index = new Dictionary<PyKey, int>(capacity);
+        _entries = new List<KeyValuePair<PyObject, PyObject>>(capacity);
+    }
 
     /// <summary>A shared empty dictionary, for bootstrapping.</summary>
     public static PyDict Empty { get; } = new();
