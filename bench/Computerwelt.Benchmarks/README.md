@@ -93,6 +93,18 @@ python3 bench/Computerwelt.Benchmarks/cpython_compare.py --out cpython.json
 dotnet run -c Release --project bench/Computerwelt.Benchmarks -- --vs-cpython cpython.json
 ```
 
+CPython's numpy uses OpenBLAS, which spreads a matrix product over every core unless told
+otherwise; the sandbox is single-threaded by design. The table below is the default
+(multi-threaded BLAS); to compare one core with one core, pin it:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 bench/Computerwelt.Benchmarks/cpython_compare.py --out cpython-1t.json
+```
+
+Only the BLAS-backed rows move: `np_matmul` goes from 459 µs to 867 µs (2.4× instead of
+4.6×), `np_linalg` from 706 to 757 µs; element-wise ufuncs and reductions are
+single-threaded in numpy either way.
+
 Both sides take the median of runs repeated for about a second after a warm-up (twenty runs
 on the .NET side, which also lets the JIT tier up); CPython's fresh column is the median of
 fifteen processes. A stopwatch, not BenchmarkDotNet — good for ratios, not for believing a
@@ -139,8 +151,9 @@ where repeating a run moves a row by 10–30%.
 - **numpy on a million elements is 1.4–1.9× behind real numpy**, both running vectorised
   kernels; what is left is mostly allocation (every intermediate is a fresh 8 MB array the
   GC has to clear and collect) and the first calls of each kernel, below. **Matrix products
-  are 4.6× behind**: numpy hands them to a multi-threaded BLAS, and this sandbox will not
-  spread one tenant's program over the host's cores.
+  are 4.6× behind a multi-threaded BLAS and 2.4× behind a single-threaded one**: the rest is
+  OpenBLAS' AVX-512 kernels against our AVX2-width one; this sandbox will not spread one
+  tenant's program over the host's cores.
 - **pandas is faster than real pandas on a small frame** (per-call overhead dominates at
   2,000 rows) and 3.5× behind on 100,000 rows — where most of the sandbox's time is the
   workload building its three columns as Python list comprehensions, which is the
@@ -159,7 +172,7 @@ the real packages, on the workloads above:
 | `np_int_math` | 6.8× | 1.5× |
 | `np_masks` | 5.1× | 1.9× |
 | `np_reductions` | 8.1× | 1.9× |
-| `np_matmul` | 31.9× | 4.6× |
+| `np_matmul` | 31.9× | 4.6× (2.4× against one BLAS thread) |
 | `np_linalg` | 6.9× | 1.7× |
 | `numpy_array` | 13.2× | 1.8× |
 | `pd_numeric` | 4.1× | 3.5× |

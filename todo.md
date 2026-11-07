@@ -786,7 +786,7 @@ and compile of a session cell, which is most of `SessionCell`.
 ## Performance — numpy and pandas, SIMD round
 
 Warm ratios against the real packages went from 5–32× to 1.4–1.9× on million-element numpy
-work, 4.6× for matrix products and 3.5× on a 100,000-row pandas frame (table, method and
+work, 4.6× for matrix products (2.4× against single-threaded OpenBLAS) and 3.5× on a 100,000-row pandas frame (table, method and
 the accuracy notes in `bench/Computerwelt.Benchmarks/README.md`, "The numeric kernels").
 
 - **numpy element-wise** (`NdSimd.cs`): contiguous operands of 64+ elements, or a scalar,
