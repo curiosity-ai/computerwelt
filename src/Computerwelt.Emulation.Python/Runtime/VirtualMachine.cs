@@ -630,7 +630,7 @@ public sealed class VirtualMachine
             // Calling an `async def` produces a coroutine; the body runs when it is awaited.
             if (function.Code.IsCoroutine)
             {
-                return new PyCoroutine(function.Name, () => Execute(frame));
+                return Coroutine(function.Name, frame);
             }
 
             return Execute(frame);
@@ -641,12 +641,20 @@ public sealed class VirtualMachine
         }
     }
 
+    /// <summary>
+    /// A coroutine over a frame. Its own method because the lambda captures the frame, and a
+    /// captured local makes the compiler allocate the closure on entry to the method that
+    /// declares it — which in <see cref="CallFunction"/> would be every call.
+    /// </summary>
+    private PyCoroutine Coroutine(string name, Frame frame) => new(name, () => Execute(frame));
+
     private Dictionary<string, PyCell>? BuildCells(PyFunction function, PyObject?[] locals)
     {
         var code = function.Code;
 
-        // Nothing captured either way: the frame gets no cell dictionary at all.
-        if (function.Closure.Count == 0 && code.CellNames.Count == 0)
+        // Nothing captured either way, or nothing that will ever be read: the frame gets no
+        // cell dictionary at all.
+        if (code.CellNames.Count == 0 && (function.Closure.Count == 0 || !code.ReadsEnclosingCells))
         {
             return null;
         }
@@ -730,29 +738,75 @@ public sealed class VirtualMachine
     {
         var code = function.Code;
         var parameters = code.Parameters;
-        var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
-        var declaredParameters = parameters.Parameters;
 
-        // The ordinary call: one argument per parameter and nothing to reconcile. What
-        // follows exists for the shapes that need reconciling — defaults, varargs,
-        // keywords, a bound receiver — and none of it says anything about this one, so it
-        // is skipped rather than walked through. A recursive function pays this per call.
-        if (arguments.Length == declaredParameters.Count
-            && keywords is null or { Count: 0 }
-            && function.BoundSelf is null
+        // The ordinary calls: positional arguments only, a receiver perhaps, trailing
+        // parameters perhaps filled from their defaults — a plain function, a method, a
+        // method with an optional argument. Nothing here allocates beyond the locals; the
+        // shapes that need reconciling (keywords, varargs, errors) take the general path.
+        if (keywords is null or { Count: 0 }
             && parameters.VarArgs is null
             && parameters.KeywordArgs is null
             && parameters.KeywordOnly.Count == 0)
         {
+            var self = function.BoundSelf;
+            var offset = self is null ? 0 : 1;
+            var supplied = arguments.Length + offset;
             var slots = code.ParameterSlots;
 
-            for (var i = 0; i < slots.Length; i++)
+            if (supplied <= slots.Length)
             {
-                locals[slots[i]] = arguments[i];
-            }
+                var defaults = supplied < slots.Length ? function.DefaultsByPosition : null;
+                var complete = true;
 
-            return locals;
+                for (var i = supplied; i < slots.Length; i++)
+                {
+                    if (defaults![i] is null)
+                    {
+                        complete = false;
+                        break;
+                    }
+                }
+
+                if (complete)
+                {
+                    var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
+
+                    if (self is not null)
+                    {
+                        locals[slots[0]] = self;
+                    }
+
+                    for (var i = 0; i < arguments.Length; i++)
+                    {
+                        locals[slots[i + offset]] = arguments[i];
+                    }
+
+                    for (var i = supplied; i < slots.Length; i++)
+                    {
+                        locals[slots[i]] = defaults![i];
+                    }
+
+                    return locals;
+                }
+            }
         }
+
+        return BindArgumentsGenerally(function, arguments, keywords);
+    }
+
+    /// <summary>
+    /// Binds every other calling convention, and reports every error, as CPython words it.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="BindArguments"/> because its lambdas capture the function
+    /// and the keywords, and the compiler allocates a captured variable's closure on entry
+    /// to the method that declares it — which in the fast path would be every call.
+    /// </remarks>
+    private PyObject?[] BindArgumentsGenerally(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    {
+        var code = function.Code;
+        var parameters = code.Parameters;
+        var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
 
         var positional = new List<PyObject>(arguments);
 

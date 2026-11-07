@@ -76,6 +76,35 @@ public sealed class CodeObject
     /// by string for every parameter, on every call, which is quadratic in a function's
     /// own size and paid per invocation.
     /// </remarks>
+    private bool? _readsEnclosingCells;
+
+    /// <summary>
+    /// Whether running this code can read a cell it inherits: it loads, stores or deletes a
+    /// cell, reads the implicit <c>__class__</c> cell, or defines code that does.
+    /// </summary>
+    /// <remarks>
+    /// Every method inherits its class body's cells (the <c>__class__</c> cell
+    /// zero-argument <c>super()</c> reads is one of them), and copying them into a fresh
+    /// dictionary on each call is wasted work for the many methods that never look.
+    /// </remarks>
+    internal bool ReadsEnclosingCells
+    {
+        get
+        {
+            if (_readsEnclosingCells is { } known)
+            {
+                return known;
+            }
+
+            var reads = Instructions.Any(static i => i.OpCode is OpCode.LoadCell or OpCode.StoreCell
+                    or OpCode.DeleteCell or OpCode.LoadClassCell)
+                || NestedCode.Any(static nested => nested.ReadsEnclosingCells);
+
+            _readsEnclosingCells = reads;
+            return reads;
+        }
+    }
+
     internal int[] ParameterSlots
     {
         get

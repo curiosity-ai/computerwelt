@@ -69,7 +69,41 @@ public sealed class PyFunction : PyCallable
     /// `__init__ = recorder.record` does — keeps the receiver it was bound to.
     /// </remarks>
     public PyFunction Bind(PyObject instance) =>
-        BoundSelf is not null ? this : new(Code, Closure, Globals, Defaults) { BoundSelf = instance, Fields = Fields };
+        BoundSelf is not null
+            ? this
+            : new(Code, Closure, Globals, Defaults) { BoundSelf = instance, Fields = Fields, _defaultsByPosition = DefaultsByPosition };
+
+    private PyObject?[]? _defaultsByPosition;
+
+    /// <summary>
+    /// The default of each positional parameter, by position (null where there is none) —
+    /// <see cref="Defaults"/> read once instead of by name on every call. Shared with the
+    /// bound copies, so a method pays for it once.
+    /// </summary>
+    internal PyObject?[] DefaultsByPosition
+    {
+        get
+        {
+            if (_defaultsByPosition is { } known)
+            {
+                return known;
+            }
+
+            var declared = Code.Parameters.Parameters;
+            var defaults = new PyObject?[declared.Count];
+
+            for (var i = 0; i < declared.Count; i++)
+            {
+                if (Defaults.Count > 0 && Defaults.TryGetValue(new PyStr(declared[i].Name), out var value))
+                {
+                    defaults[i] = value;
+                }
+            }
+
+            _defaultsByPosition = defaults;
+            return defaults;
+        }
+    }
 
     /// <summary>
     /// Attributes a program has set on the function — <c>__wrapped__</c>, a renamed

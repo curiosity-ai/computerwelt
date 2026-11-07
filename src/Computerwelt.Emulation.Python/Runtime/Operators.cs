@@ -33,6 +33,28 @@ public static class Operators
             ["@"] = ("__matmul__", "__rmatmul__"),
         };
 
+    /// <summary>
+    /// The operator an augmented assignment applies — <c>+</c> for <c>+=</c> — as an interned
+    /// literal rather than a substring, which would be a string allocated per execution.
+    /// </summary>
+    private static string PlainOperator(string augmented) => augmented switch
+    {
+        "+=" => "+",
+        "-=" => "-",
+        "*=" => "*",
+        "/=" => "/",
+        "//=" => "//",
+        "%=" => "%",
+        "**=" => "**",
+        "&=" => "&",
+        "|=" => "|",
+        "^=" => "^",
+        "<<=" => "<<",
+        ">>=" => ">>",
+        "@=" => "@",
+        _ => augmented[..^1],
+    };
+
     /// <summary>Applies a binary operator.</summary>
     public static PyObject Binary(string op, PyObject left, PyObject right)
     {
@@ -43,7 +65,7 @@ public static class Operators
             return Apply(op, left, right);
         }
 
-        var plain = op[..^1];
+        var plain = PlainOperator(op);
 
         if (InPlace(plain, left, right) is { } mutated)
         {
@@ -796,6 +818,33 @@ public static class Operators
     /// The identity matters: <c>a = b; a += [1]</c> must leave <c>b</c> holding the longer
     /// list, which rebinding a fresh one would not.
     /// </remarks>
+    /// <summary>
+    /// The in-place set operators. Kept out of <see cref="InPlace"/> because its lambdas
+    /// capture the two sets, and a captured variable makes the compiler allocate its closure
+    /// at the top of the method — on every augmented assignment, set or not.
+    /// </summary>
+    private static PySet UpdateSet(string op, PySet set, PySet other)
+    {
+        var items = op switch
+        {
+            "|" => set.Items.Concat(other.Items),
+            "&" => set.Items.Where(other.Contains),
+            "-" => set.Items.Where(item => !other.Contains(item)),
+            _ => set.Items.Where(item => !other.Contains(item))
+                .Concat(other.Items.Where(item => !set.Contains(item))),
+        };
+
+        var replacement = items.ToList();
+        set.Clear();
+
+        foreach (var item in replacement)
+        {
+            set.Add(item);
+        }
+
+        return set;
+    }
+
     private static PyObject? InPlace(string op, PyObject left, PyObject right)
     {
         if (left is IPyOperand operand && operand.InPlace(op, right) is { } updated)
@@ -865,26 +914,7 @@ public static class Operators
             }
 
             case ("|" or "&" or "-" or "^", PySet { IsFrozen: false } set) when AsSet(right) is { } other:
-            {
-                var items = op switch
-                {
-                    "|" => set.Items.Concat(other.Items),
-                    "&" => set.Items.Where(other.Contains),
-                    "-" => set.Items.Where(item => !other.Contains(item)),
-                    _ => set.Items.Where(item => !other.Contains(item))
-                        .Concat(other.Items.Where(item => !set.Contains(item))),
-                };
-
-                var replacement = items.ToList();
-                set.Clear();
-
-                foreach (var item in replacement)
-                {
-                    set.Add(item);
-                }
-
-                return set;
-            }
+                return UpdateSet(op, set, other);
 
             case ("|", PyDict dict) when right is PyDict source:
                 foreach (var (key, value) in source.Entries)
