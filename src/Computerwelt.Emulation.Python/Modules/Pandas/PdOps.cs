@@ -39,6 +39,12 @@ internal static class PdOps
 
         public DType Type { get; }
 
+        /// <summary>The column, or null for a scalar.</summary>
+        public PdColumn? Column => _column;
+
+        /// <summary>The scalar, or null for a column.</summary>
+        public PyObject? Scalar => _scalar;
+
         public PyObject this[int i] => _column is { } column ? column.Values[i] : _scalar!;
 
         public bool IsNumeric => Type is DType.Int64 or DType.Float64 or DType.Bool;
@@ -61,6 +67,11 @@ internal static class PdOps
         if (op is "&" or "|" or "^")
         {
             return Logical(op, left, right, count);
+        }
+
+        if (PdVector.Arithmetic(op, left, right, count) is { } vectorised)
+        {
+            return vectorised;
         }
 
         if (left.IsNumeric && right.IsNumeric)
@@ -103,6 +114,11 @@ internal static class PdOps
 
     private static PdColumn Logical(string op, Operand left, Operand right, int count)
     {
+        if (PdVector.Logical(op, left, right, count) is { } vectorised)
+        {
+            return vectorised;
+        }
+
         if (left.Type == DType.Int64 && right.Type == DType.Int64)
         {
             var values = new long[count];
@@ -245,6 +261,12 @@ internal static class PdOps
     public static PdColumn Compare(string op, Operand left, Operand right, int count)
     {
         Pd.CheckSize(count);
+
+        if (PdVector.Compare(op, left, right, count) is { } vectorised)
+        {
+            return vectorised;
+        }
+
         var result = new bool[count];
 
         if (left.IsNumeric && right.IsNumeric)

@@ -106,6 +106,11 @@ internal static class PdReduce
             return column.Type == DType.DateTime && how is "min" or "max" ? PdNaT.Instance : Pd.NaN;
         }
 
+        if (Unboxed(column, how, ddof, minCount) is { } fast)
+        {
+            return fast;
+        }
+
         var positions = Valid(column);
 
         if (column.Type == DType.DateTime)
@@ -226,6 +231,87 @@ internal static class PdReduce
         }
 
         throw Pd.ValueError($"unknown reduction '{how}'");
+    }
+
+    /// <summary>
+    /// The common reductions over a float64 or int64 column with nothing missing, read from
+    /// the unboxed values; null for anything else. Every result is the one the general path
+    /// gives: the sums are the same pairwise sums, and int64 addition wraps whatever order it
+    /// is done in.
+    /// </summary>
+    private static PyObject? Unboxed(PdColumn column, string how, int ddof, int minCount)
+    {
+        if (how is not ("sum" or "mean" or "var" or "std" or "sem" or "min" or "max") || column.Length == 0)
+        {
+            return null;
+        }
+
+        if (column.Type == DType.Int64)
+        {
+            var longs = column.LongArray;
+
+            switch (how)
+            {
+                case "sum":
+                    return longs.Length < minCount ? Pd.NaN : PyInt.From(System.Numerics.Tensors.TensorPrimitives.Sum<long>(longs));
+                case "min":
+                    return PyInt.From(System.Numerics.Tensors.TensorPrimitives.Min<long>(longs));
+                case "max":
+                    return PyInt.From(System.Numerics.Tensors.TensorPrimitives.Max<long>(longs));
+                default:
+                    return Moments(column.Doubles(), how, ddof);
+            }
+        }
+
+        if (column.Type != DType.Float64)
+        {
+            return null;
+        }
+
+        var values = column.FloatArray;
+
+        if (values.AsSpan().ContainsAnyExceptInRange(double.NegativeInfinity, double.PositiveInfinity))
+        {
+            // A NaN is a missing value, which the general path skips.
+            return null;
+        }
+
+        return how switch
+        {
+            "sum" => values.Length < minCount ? Pd.NaN : Pd.Float(Pd.PairwiseSum(values, 0, values.Length)),
+            "min" => Pd.Float(System.Numerics.Tensors.TensorPrimitives.Min(values)),
+            "max" => Pd.Float(System.Numerics.Tensors.TensorPrimitives.Max(values)),
+            _ => Moments(values, how, ddof),
+        };
+    }
+
+    /// <summary>The mean, or the variance family, of values with none missing — as <see cref="Spread"/> computes it.</summary>
+    private static PyObject Moments(double[] values, string how, int ddof)
+    {
+        var count = values.Length;
+        var mean = Pd.PairwiseSum(values, 0, count) / count;
+
+        if (how == "mean")
+        {
+            return Pd.Float(mean);
+        }
+
+        if (count - ddof <= 0)
+        {
+            return Pd.NaN;
+        }
+
+        var squares = new double[count];
+        System.Numerics.Tensors.TensorPrimitives.Subtract(mean, values, squares);
+        System.Numerics.Tensors.TensorPrimitives.Multiply(squares, squares, squares);
+        var variance = Pd.PairwiseSum(squares, 0, count) / (count - ddof);
+
+        return Pd.Float(how switch
+        {
+            "var" => variance,
+            "std" => Math.Sqrt(variance),
+            _ => Math.Sqrt(variance) / Math.Sqrt(count),
+        });
     }
 
     /// <summary>numpy's (and so pandas') variance: the mean, then the squared deviations, pairwise.</summary>

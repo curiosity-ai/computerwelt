@@ -223,8 +223,8 @@ internal sealed partial class PdSeries : PyObject, IPyOperand
         if (other is PdSeries series)
         {
             var (index, left, right) = PdOps.Align(Index, series.Index);
-            var mine = new PdOps.Operand(Data.Take(left));
-            var theirs = new PdOps.Operand(series.Data.Take(right));
+            var mine = new PdOps.Operand(PdVector.IsIdentity(left, Count) ? Data : Data.Take(left));
+            var theirs = new PdOps.Operand(PdVector.IsIdentity(right, series.Count) ? series.Data : series.Data.Take(right));
             var name = Pd.Same(Name, series.Name) ? Name : PyNone.Instance;
             var result = reflected
                 ? PdOps.Arithmetic(op, theirs, mine, index.Count)

@@ -186,6 +186,85 @@ internal sealed class PdGroupBy : PyObject
             return _groups;
         }
 
+        var groups = TypedGroups() ?? BoxedGroups();
+
+        if (_sort && groups.Count > 0)
+        {
+            var firsts = groups.Select(static g => g.First).ToList();
+            var order = PdSort.Order([.. _keys.Select(k => k.Take(firsts))], [.. _keys.Select(_ => true)], "last");
+            groups = [.. order.Select(o => groups[o])];
+        }
+
+        return _groups = [.. groups.Select(static g => (g.Key, g.Rows))];
+    }
+
+    /// <summary>
+    /// The groups of one int64 or float64 key, hashed on the unboxed values; null for any
+    /// other key, or a float key holding NaN that is not being dropped.
+    /// </summary>
+    /// <remarks>
+    /// The same groups as the boxed path: within one int64 or float64 column, Python
+    /// equality is equality of the numbers, and <see cref="double"/> equality already puts
+    /// 0.0 and -0.0 together. A NaN key row is skipped with dropna, as the boxed path does.
+    /// </remarks>
+    private List<(PyObject Key, List<int> Rows, int First)>? TypedGroups()
+    {
+        if (_keys.Count != 1 || _tupleKeys)
+        {
+            return null;
+        }
+
+        var column = _keys[0];
+
+        if (column.Type == DType.Int64)
+        {
+            return Grouped(column.LongArray, static v => PyInt.From(v), static _ => false);
+        }
+
+        if (column.Type == DType.Float64)
+        {
+            var doubles = column.FloatArray;
+
+            if (!_dropna && doubles.AsSpan().ContainsAnyExceptInRange(double.NegativeInfinity, double.PositiveInfinity))
+            {
+                return null;
+            }
+
+            return Grouped(doubles, static v => Pd.Float(v), double.IsNaN);
+        }
+
+        return null;
+    }
+
+    private static List<(PyObject Key, List<int> Rows, int First)> Grouped<T>(T[] keys, Func<T, PyObject> box, Func<T, bool> skip)
+        where T : notnull
+    {
+        var lookup = new Dictionary<T, int>();
+        var groups = new List<(PyObject Key, List<int> Rows, int First)>();
+
+        for (var r = 0; r < keys.Length; r++)
+        {
+            var key = keys[r];
+
+            if (skip(key))
+            {
+                continue;
+            }
+
+            if (!lookup.TryGetValue(key, out var at))
+            {
+                lookup[key] = at = groups.Count;
+                groups.Add((box(key), [], r));
+            }
+
+            groups[at].Rows.Add(r);
+        }
+
+        return groups;
+    }
+
+    private List<(PyObject Key, List<int> Rows, int First)> BoxedGroups()
+    {
         var lookup = new Dictionary<PyKey, int>();
         var groups = new List<(PyObject Key, List<int> Rows, int First)>();
         var rows = _frame.RowCount;
@@ -224,14 +303,7 @@ internal sealed class PdGroupBy : PyObject
             groups[at].Rows.Add(r);
         }
 
-        if (_sort && groups.Count > 0)
-        {
-            var firsts = groups.Select(static g => g.First).ToList();
-            var order = PdSort.Order([.. _keys.Select(k => k.Take(firsts))], [.. _keys.Select(_ => true)], "last");
-            groups = [.. order.Select(o => groups[o])];
-        }
-
-        return _groups = [.. groups.Select(static g => (g.Key, g.Rows))];
+        return groups;
     }
 
     /// <summary>The result index: the group keys, one level per key.</summary>

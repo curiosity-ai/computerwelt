@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Numerics.Tensors;
+using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 
 namespace Computerwelt.Emulation.Python.Modules.Numpy;
@@ -43,6 +44,7 @@ internal static partial class LinAlg
     private static bool UsesKernel(int p, int k, int q) => (long)p * k * q >= SmallWork;
 
     /// <summary><c>C = A·B</c> for row-major A (p×k), B (k×q) and C (p×q).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void Gemm(ReadOnlySpan<double> a, ReadOnlySpan<double> b, Span<double> c, int p, int k, int q)
     {
         c.Clear();
@@ -101,6 +103,7 @@ internal static partial class LinAlg
     }
 
     /// <summary>B's rows <c>depth..depth+kb</c>, as strips of eight columns, the last padded with zeros.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Pack(ReadOnlySpan<double> b, double[] packed, int depth, int kb, int q, int strips)
     {
         for (var s = 0; s < strips; s++)
@@ -119,6 +122,7 @@ internal static partial class LinAlg
     }
 
     /// <summary>A 4×8 block of C accumulated over one depth block; rows and columns past the edge are dropped.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Block(
         ReadOnlySpan<double> a,
         ReadOnlySpan<double> strip,
@@ -181,6 +185,7 @@ internal static partial class LinAlg
     }
 
     /// <summary><c>C = A·B</c> over int64, wrapping: each row of C gathers scaled rows of B.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void Gemm(ReadOnlySpan<long> a, ReadOnlySpan<long> b, Span<long> c, int p, int k, int q)
     {
         c.Clear();
@@ -201,6 +206,7 @@ internal static partial class LinAlg
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void AddScaled(Span<long> target, ReadOnlySpan<long> source, long factor)
     {
         var j = 0;

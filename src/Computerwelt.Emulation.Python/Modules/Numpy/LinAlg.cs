@@ -272,6 +272,7 @@ internal static partial class LinAlg
     }
 
     /// <summary>LU decomposition with partial pivoting, in place. Returns the row swaps' sign, or 0 when singular.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static int Decompose(double[,] lu, int[] pivots)
     {
         var n = lu.GetLength(0);
@@ -356,6 +357,7 @@ internal static partial class LinAlg
     }
 
     /// <summary>Solves A x = B for each column of B.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static double[,] SolveMatrix(double[,] a, double[,] b)
     {
         var n = a.GetLength(0);

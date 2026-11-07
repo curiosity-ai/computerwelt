@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Computerwelt.Emulation.Python.Runtime;
 
@@ -63,6 +64,7 @@ internal static partial class NdSimd
     }
 
     /// <summary>The elements of <paramref name="source"/> whose mask byte is set, in order.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Compress<T>(ReadOnlySpan<T> source, ReadOnlySpan<bool> mask, Span<T> destination)
     {
         var words = MemoryMarshal.Cast<bool, ulong>(mask);
@@ -138,6 +140,7 @@ internal static partial class NdSimd
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Fill<T>(Span<T> target, ReadOnlySpan<bool> mask, T value)
     {
         var words = MemoryMarshal.Cast<bool, ulong>(mask);
@@ -178,6 +181,7 @@ internal static partial class NdSimd
     }
 
     /// <summary><c>np.where(c, x, y)</c> over a contiguous bool condition and float/int operands, or null.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static NdArray? TryWhere(NdArray c, NdArray x, NdArray y, int[] shape, int n)
     {
         if (n < Threshold || c.Kind != DKind.Bool || !Covers(c, shape) || !Usable(x, shape) || !Usable(y, shape)
@@ -226,6 +230,7 @@ internal static partial class NdSimd
     }
 
     /// <summary>The number of non-zero elements of a contiguous array, or -1 to take the general path.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static long CountNonZero(NdArray array)
     {
         if (array.Size < Threshold || !array.IsContiguous)

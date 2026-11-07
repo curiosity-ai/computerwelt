@@ -1,4 +1,5 @@
 using System.Numerics.Tensors;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -38,7 +39,7 @@ internal static partial class NdSimd
     /// <summary>
     /// One operand of an element loop: a contiguous span over the whole result, or a scalar.
     /// </summary>
-    private readonly ref struct Operand<T>
+    internal readonly ref struct Operand<T>
     {
         public Operand(ReadOnlySpan<T> span)
         {
@@ -172,6 +173,7 @@ internal static partial class NdSimd
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Apply(string name, Operand<double> a, Operand<double> b, Span<double> d)
     {
         switch (name)
@@ -313,6 +315,7 @@ internal static partial class NdSimd
     /// The int64 operators whose numpy result is the wrapping machine result — so a SIMD
     /// add is the same answer. Division, floor division, modulo and power keep their loops.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static NdArray? IntBinary(string name, NdArray x, NdArray y, int[] shape, int n)
     {
         if (name is not ("add" or "subtract" or "multiply" or "maximum" or "fmax" or "minimum" or "fmin"
@@ -399,6 +402,7 @@ internal static partial class NdSimd
     }
 
     /// <summary>Wrapping int64 multiplication by one factor.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void MultiplyByScalar(ReadOnlySpan<long> values, long factor, Span<long> destination)
     {
         var i = 0;
@@ -483,7 +487,8 @@ internal static partial class NdSimd
     /// lane mask, whose most significant bits become the bools. IEEE semantics either way —
     /// NaN is unequal to everything and unordered — exactly as the scalar loop.
     /// </summary>
-    private static void Compare<T>(string name, Operand<T> a, Operand<T> b, Span<bool> result)
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void Compare<T>(string name, Operand<T> a, Operand<T> b, Span<bool> result)
         where T : unmanaged, System.Numerics.INumber<T>
     {
         var op = name switch
@@ -570,6 +575,7 @@ internal static partial class NdSimd
         return table;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void StoreBools(Span<bool> destination, uint bits)
     {
         var bytes = MemoryMarshal.AsBytes(destination);

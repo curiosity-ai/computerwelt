@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using Computerwelt.Emulation.Python.Runtime;
 
 namespace Computerwelt.Emulation.Python.Modules.Pandas;
@@ -271,6 +273,7 @@ internal static class Pd
     /// <summary>
     /// numpy's pairwise summation, so a float sum agrees with pandas to the last bit.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static double PairwiseSum(double[] values, int start, int count)
     {
         if (count < 8)
@@ -286,22 +289,20 @@ internal static class Pd
 
         if (count <= 128)
         {
-            var r = new double[8];
-            for (var j = 0; j < 8; j++)
-            {
-                r[j] = values[start + j];
-            }
+            // numpy's eight running sums are two four-lane vectors: a lane-wise add is the same
+            // eight additions in the same order, so the result is bit-for-bit numpy's.
+            var block = values.AsSpan(start, count);
+            var low = Vector256.Create(block[..4]);
+            var high = Vector256.Create(block.Slice(4, 4));
 
             var i = 8;
             for (; i < count - (count % 8); i += 8)
             {
-                for (var j = 0; j < 8; j++)
-                {
-                    r[j] += values[start + i + j];
-                }
+                low += Vector256.Create(block.Slice(i, 4));
+                high += Vector256.Create(block.Slice(i + 4, 4));
             }
 
-            var result = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+            var result = ((low[0] + low[1]) + (low[2] + low[3])) + ((high[0] + high[1]) + (high[2] + high[3]));
 
             for (; i < count; i++)
             {
@@ -352,26 +353,116 @@ internal static class Pd
 /// One column's values with their dtype. Shared between a frame and the Series it hands
 /// out until either side writes, at which point the writer copies (copy-on-write).
 /// </summary>
+/// <remarks>
+/// A numeric column holds its values unboxed — <c>double[]</c>, <c>long[]</c> or
+/// <c>bool[]</c> — and builds the boxed <see cref="Values"/> only when something reads them
+/// one Python object at a time. The vectorised operators and reductions read the typed
+/// array (<see cref="FloatArray"/>, <see cref="LongArray"/>, <see cref="BoolArray"/>), so a
+/// chain of column arithmetic never boxes. At least one representation is always present,
+/// and when both are they agree: the only write, <see cref="With(IReadOnlyList{int}, PyObject)"/>,
+/// writes the boxed array and drops the typed one.
+/// </remarks>
 internal sealed class PdColumn
 {
+    private PyObject[]? _values;
+    private double[]? _floats;
+    private long[]? _longs;
+    private bool[]? _bools;
+
     public PdColumn(DType type, PyObject[] values)
     {
         Type = type;
-        Values = values;
+        _values = values;
+    }
+
+    private PdColumn(DType type, PyObject[]? values, double[]? floats, long[]? longs, bool[]? bools)
+    {
+        Type = type;
+        _values = values;
+        _floats = floats;
+        _longs = longs;
+        _bools = bools;
     }
 
     /// <summary>The dtype.</summary>
     public DType Type { get; }
 
     /// <summary>The values, normalized for the dtype (floats are PyFloat, NaN for missing).</summary>
-    public PyObject[] Values { get; }
+    public PyObject[] Values => _values ??= Box();
 
     /// <summary>True once the column is reachable from more than one owner.</summary>
     public bool Shared { get; set; }
 
-    public int Length => Values.Length;
+    public int Length => _values?.Length ?? _floats?.Length ?? _longs?.Length ?? _bools!.Length;
 
     public bool IsNumeric => Type is DType.Int64 or DType.Float64 or DType.Bool;
+
+    /// <summary>A float64 column's values, unboxed; never to be written.</summary>
+    public double[] FloatArray => Type == DType.Float64
+        ? _floats ??= Unbox(static v => Pd.ToDouble(v))
+        : throw new InvalidOperationException("not a float64 column");
+
+    /// <summary>An int64 column's values, unboxed; never to be written.</summary>
+    public long[] LongArray => Type == DType.Int64
+        ? _longs ??= Unbox(static v => (long)((PyInt)v).Value)
+        : throw new InvalidOperationException("not an int64 column");
+
+    /// <summary>A bool column's values, unboxed; never to be written.</summary>
+    public bool[] BoolArray => Type == DType.Bool
+        ? _bools ??= Unbox(static v => v.IsTruthy())
+        : throw new InvalidOperationException("not a bool column");
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private T[] Unbox<T>(Func<PyObject, T> read)
+    {
+        var values = _values!;
+        var result = new T[values.Length];
+
+        for (var i = 0; i < values.Length; i++)
+        {
+            result[i] = read(values[i]);
+        }
+
+        return result;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private PyObject[] Box()
+    {
+        if (_floats is { } floats)
+        {
+            var boxed = new PyObject[floats.Length];
+
+            for (var i = 0; i < floats.Length; i++)
+            {
+                boxed[i] = Pd.Float(floats[i]);
+            }
+
+            return boxed;
+        }
+
+        if (_longs is { } longs)
+        {
+            var boxed = new PyObject[longs.Length];
+
+            for (var i = 0; i < longs.Length; i++)
+            {
+                boxed[i] = PyInt.From(longs[i]);
+            }
+
+            return boxed;
+        }
+
+        var bools = _bools!;
+        var flags = new PyObject[bools.Length];
+
+        for (var i = 0; i < bools.Length; i++)
+        {
+            flags[i] = PyBool.Of(bools[i]);
+        }
+
+        return flags;
+    }
 
     /// <summary>The value a missing slot holds for this dtype.</summary>
     public static PyObject MissingFor(DType type) => type switch
@@ -381,7 +472,12 @@ internal sealed class PdColumn
     };
 
     /// <summary>A copy that nothing else references.</summary>
-    public PdColumn Clone() => new(Type, (PyObject[])Values.Clone());
+    public PdColumn Clone() => new(
+        Type,
+        (PyObject[]?)_values?.Clone(),
+        (double[]?)_floats?.Clone(),
+        (long[]?)_longs?.Clone(),
+        (bool[]?)_bools?.Clone());
 
     /// <summary>A column of one repeated value.</summary>
     public static PdColumn Repeat(PyObject value, int count)
@@ -393,45 +489,31 @@ internal sealed class PdColumn
         return new PdColumn(first.Type, values);
     }
 
-    /// <summary>A float column.</summary>
-    public static PdColumn Floats(double[] values)
-    {
-        var result = new PyObject[values.Length];
-        for (var i = 0; i < values.Length; i++)
-        {
-            result[i] = Pd.Float(values[i]);
-        }
+    /// <summary>A float column; it takes the array, which nothing may write afterwards.</summary>
+    public static PdColumn Floats(double[] values) => new(DType.Float64, null, values, null, null);
 
-        return new PdColumn(DType.Float64, result);
-    }
+    /// <summary>An int column; it takes the array, which nothing may write afterwards.</summary>
+    public static PdColumn Ints(long[] values) => new(DType.Int64, null, null, values, null);
 
-    /// <summary>An int column.</summary>
-    public static PdColumn Ints(long[] values)
-    {
-        var result = new PyObject[values.Length];
-        for (var i = 0; i < values.Length; i++)
-        {
-            result[i] = PyInt.From(values[i]);
-        }
+    /// <summary>A bool column; it takes the array, which nothing may write afterwards.</summary>
+    public static PdColumn Bools(bool[] values) => new(DType.Bool, null, null, null, values);
 
-        return new PdColumn(DType.Int64, result);
-    }
-
-    /// <summary>A bool column.</summary>
-    public static PdColumn Bools(bool[] values)
-    {
-        var result = new PyObject[values.Length];
-        for (var i = 0; i < values.Length; i++)
-        {
-            result[i] = PyBool.Of(values[i]);
-        }
-
-        return new PdColumn(DType.Bool, result);
-    }
-
-    /// <summary>The values as doubles, NaN where missing.</summary>
+    /// <summary>The values as doubles, NaN where missing — a new array the caller owns.</summary>
     public double[] Doubles()
     {
+        switch (Type)
+        {
+            case DType.Float64:
+                return (double[])FloatArray.Clone();
+            case DType.Int64:
+            {
+                var longs = LongArray;
+                var converted = new double[longs.Length];
+                System.Numerics.Tensors.TensorPrimitives.ConvertTruncating<long, double>(longs, converted);
+                return converted;
+            }
+        }
+
         var result = new double[Values.Length];
         for (var i = 0; i < result.Length; i++)
         {
@@ -445,6 +527,7 @@ internal sealed class PdColumn
     public bool IsMissing(int i) => Type switch
     {
         DType.Int64 or DType.Bool => false,
+        DType.Float64 when _floats is { } floats => double.IsNaN(floats[i]),
         _ => Pd.IsMissing(Values[i]),
     };
 
@@ -522,32 +605,43 @@ internal sealed class PdColumn
 
         if (anyNonMissing && allBool && !anyFloatOrMissing)
         {
+            var flags = new bool[values.Length];
+
             for (var i = 0; i < values.Length; i++)
             {
                 values[i] = Unwrap(raw[i]);
+                flags[i] = values[i].IsTruthy();
             }
 
-            return new PdColumn(DType.Bool, values);
+            // The boxes are the caller's own objects, so keeping them costs nothing.
+            return new PdColumn(DType.Bool, values, null, null, flags);
         }
 
         if (anyValue && allInt && !anyFloatOrMissing)
         {
+            var longs = new long[values.Length];
+
             for (var i = 0; i < values.Length; i++)
             {
                 values[i] = Unwrap(raw[i]) is PyBool flag ? PyInt.From(flag.Value ? 1 : 0) : Unwrap(raw[i]);
+                longs[i] = (long)((PyInt)values[i]).Value;
             }
 
-            return new PdColumn(DType.Int64, values);
+            return new PdColumn(DType.Int64, values, null, longs, null);
         }
 
         if (allNumeric && (anyValue || raw.Any(static v => v is PyFloat)) && !raw.Any(static v => Unwrap(v) is PyBool))
         {
-            for (var i = 0; i < values.Length; i++)
+            // Every value would be a new box, so the column is built unboxed and boxes later
+            // only if something reads it one object at a time.
+            var doubles = new double[values.Length];
+
+            for (var i = 0; i < doubles.Length; i++)
             {
-                values[i] = Pd.Float(Pd.ToDouble(Unwrap(raw[i])));
+                doubles[i] = Pd.ToDouble(Unwrap(raw[i]));
             }
 
-            return new PdColumn(DType.Float64, values);
+            return Floats(doubles);
         }
 
         if (anyTime && allTime)
@@ -684,15 +778,23 @@ internal sealed class PdColumn
     public PdColumn Take(IReadOnlyList<int> positions)
     {
         Pd.CheckSize(positions.Count);
-        var anyMissing = false;
-
-        foreach (var position in positions)
+        ReadOnlySpan<int> span = positions switch
         {
-            if (position < 0)
+            int[] array => array,
+            List<int> list => System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list),
+            _ => [.. positions],
+        };
+
+        var anyMissing = span.IndexOfAnyInRange(int.MinValue, -1) >= 0;
+
+        if (!anyMissing && (_floats is not null || _longs is not null || _bools is not null))
+        {
+            return Type switch
             {
-                anyMissing = true;
-                break;
-            }
+                DType.Float64 => Floats(Gather(FloatArray, span)),
+                DType.Int64 => Ints(Gather(LongArray, span)),
+                _ => Bools(Gather(BoolArray, span)),
+            };
         }
 
         var type = !anyMissing ? Type : Type switch
@@ -725,9 +827,32 @@ internal sealed class PdColumn
         return new PdColumn(type, result);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static T[] Gather<T>(T[] source, ReadOnlySpan<int> positions)
+    {
+        var result = GC.AllocateUninitializedArray<T>(positions.Length);
+
+        for (var i = 0; i < result.Length; i++)
+        {
+            result[i] = source[positions[i]];
+        }
+
+        return result;
+    }
+
     /// <summary>A contiguous run of values.</summary>
     public PdColumn Range(int start, int count)
     {
+        if (_values is null)
+        {
+            return Type switch
+            {
+                DType.Float64 => Floats(FloatArray.AsSpan(start, count).ToArray()),
+                DType.Int64 => Ints(LongArray.AsSpan(start, count).ToArray()),
+                _ => Bools(BoolArray.AsSpan(start, count).ToArray()),
+            };
+        }
+
         var result = new PyObject[count];
         Array.Copy(Values, start, result, 0, count);
         return new PdColumn(Type, result);
@@ -747,11 +872,17 @@ internal sealed class PdColumn
 
         if (Fits(value) is { } normalized)
         {
+            var values = Values;
+
             foreach (var position in positions)
             {
-                Values[position] = normalized;
+                values[position] = normalized;
             }
 
+            // The boxed array is now the only true copy.
+            _floats = null;
+            _longs = null;
+            _bools = null;
             return this;
         }
 

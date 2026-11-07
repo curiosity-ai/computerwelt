@@ -87,6 +87,23 @@ internal static class PdSelect
     /// <summary>The rows a boolean Series selects, aligned on labels when its index differs.</summary>
     public static List<int> Mask(PdSeries mask, PdIndex index)
     {
+        if (mask.Count == index.Count && mask.Index.SameAs(index) && mask.Data.Type == DType.Bool)
+        {
+            // A bool column holds no missing values: the set flags are the rows.
+            var flags = mask.Data.BoolArray;
+            var rows = new List<int>(Numpy.NdSimd.CountTrue(flags));
+
+            for (var i = 0; i < flags.Length; i++)
+            {
+                if (flags[i])
+                {
+                    rows.Add(i);
+                }
+            }
+
+            return rows;
+        }
+
         if (mask.Count == index.Count && mask.Index.SameAs(index))
         {
             return [.. Enumerable.Range(0, mask.Count).Where(i => !Pd.IsMissing(mask.Data.Values[i]) && mask.Data.Values[i].IsTruthy())];

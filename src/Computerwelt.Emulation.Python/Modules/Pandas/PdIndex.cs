@@ -62,14 +62,14 @@ internal sealed class PdIndex : PyObject, IPyOperand
 
         var count = step > 0 ? Math.Max(0, (stop - start + step - 1) / step) : Math.Max(0, (start - stop - step - 1) / -step);
         Pd.CheckSize(count);
-        var values = new PyObject[count];
+        var values = new long[count];
 
         for (var i = 0; i < count; i++)
         {
-            values[i] = PyInt.From(start + (i * step));
+            values[i] = start + (i * step);
         }
 
-        return new PdIndex(new PdColumn(DType.Int64, values), name) { IsRange = true, RangeStart = start, RangeStep = step };
+        return new PdIndex(PdColumn.Ints(values), name) { IsRange = true, RangeStart = start, RangeStep = step };
     }
 
     /// <summary>An index over raw labels, inferring their dtype.</summary>
