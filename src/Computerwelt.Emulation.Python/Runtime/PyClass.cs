@@ -78,7 +78,10 @@ public sealed class PyClass : PyCallable
                 case PyType builtinType:
                     declared.Add(builtinType);
 
-                    if (!ReferenceEquals(builtinType, TypeRegistry.Object))
+                    // `object` and the `collections.abc` interfaces add nothing to an
+                    // instance's layout; any other built-in becomes the value it extends.
+                    if (!ReferenceEquals(builtinType, TypeRegistry.Object)
+                        && !builtinType.Members.ContainsKey("__abc_protocol__"))
                     {
                         SetBuiltinBase(builtinType);
                     }

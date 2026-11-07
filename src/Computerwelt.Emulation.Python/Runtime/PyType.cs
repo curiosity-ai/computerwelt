@@ -499,6 +499,12 @@ public static class TypeRegistry
                     return true;
                 }
 
+                // A class that names an interface (`class M(Mapping)`) is one of it.
+                if (value is PyInstance declaring && declaring.Class.Mro.Any(c => c.Bases.Contains(builtin)))
+                {
+                    return true;
+                }
+
                 // An instance of a class extending a built-in is an instance of the built-in.
                 if (value is PyInstance { BuiltinValue: { } inner } && !ReferenceEquals(builtin, Object))
                 {
