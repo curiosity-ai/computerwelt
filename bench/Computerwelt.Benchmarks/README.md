@@ -129,8 +129,8 @@ where repeating a run moves a row by 10–30%.
   library code written in C on CPython's side and in C# on ours (`json`, `enum`,
   `dataclasses`). CPython 3.13 has an adaptive specializing interpreter and decades of
   tuning; this VM is a straightforward one, and it is the thing to make faster next.
-- **numpy is 13× slower warm**: CPython's numpy is vectorised C, this one is managed loops
-  over boxed-free arrays with per-call overhead that dominates at this size. **pandas is a
+- **numpy is 13× slower warm**: CPython's numpy is vectorised C, this one is scalar managed
+  loops over typed arrays, with per-call overhead that dominates at this size. **pandas is a
   little faster than real pandas** on a small frame, because real pandas' per-call overhead
   (index alignment, dtype dispatch, block management) is large next to 2,000 rows; on large
   frames real pandas' vectorised kernels would win.
