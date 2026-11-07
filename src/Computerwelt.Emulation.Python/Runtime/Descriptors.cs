@@ -189,6 +189,36 @@ public sealed class PySuper : PyObject
     /// <inheritdoc />
     public override string Repr() => $"<super: <class '{Start.Name}'>, <{ReceiverClass.Name} object>>";
 
+    /// <summary>The raw member a lookup through this super object finds along the MRO, or null.</summary>
+    internal PyObject? FindMember(string name)
+    {
+        var mro = ReceiverClass.Mro;
+        var index = IndexOfStart(mro);
+
+        for (var i = index + 1; i < mro.Count; i++)
+        {
+            if (mro[i].Members.TryGetValue(name, out var member))
+            {
+                return member;
+            }
+        }
+
+        return null;
+    }
+
+    private int IndexOfStart(IReadOnlyList<PyClass> mro)
+    {
+        for (var i = 0; i < mro.Count; i++)
+        {
+            if (ReferenceEquals(mro[i], Start))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     /// <inheritdoc />
     public override PyObject? GetAttribute(string name)
     {

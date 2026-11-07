@@ -71,7 +71,7 @@ public sealed class PyFunction : PyCallable
     public PyFunction Bind(PyObject instance) =>
         BoundSelf is not null
             ? this
-            : new(Code, Closure, Globals, Defaults) { BoundSelf = instance, Fields = Fields, _defaultsByPosition = DefaultsByPosition };
+            : new(Code, Closure, Globals, Defaults) { BoundSelf = instance, _fields = _fields, _defaultsByPosition = DefaultsByPosition };
 
     private PyObject?[]? _defaultsByPosition;
 
@@ -110,11 +110,19 @@ public sealed class PyFunction : PyCallable
     /// <c>__name__</c>, a counter a decorator keeps. Shared with the bound copies, so setting
     /// one through an instance is seen through the class.
     /// </summary>
-    internal Dictionary<string, PyObject> Fields { get; init; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, PyObject> Fields
+    {
+        // Made on first write: almost no function ever has an attribute set on it, and a
+        // bound method is a copy made per method access.
+        get => _fields ??= new(StringComparer.Ordinal);
+        init => _fields = value;
+    }
+
+    private Dictionary<string, PyObject>? _fields;
 
     /// <inheritdoc />
     public override PyObject? GetAttribute(string name) =>
-        Fields.GetValueOrDefault(name)
+        _fields?.GetValueOrDefault(name)
         ?? (name == "__doc__" ? (Code.Doc is { } doc ? new PyStr(doc) : PyNone.Instance) : base.GetAttribute(name));
 
     /// <inheritdoc />

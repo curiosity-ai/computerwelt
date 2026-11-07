@@ -474,7 +474,7 @@ public sealed class VirtualMachine
             // An initializer produces the instance by mutating it, so returning anything is
             // a mistake worth reporting rather than quietly dropping.
             case PyFunction function:
-                Initialized(CallFunction(function.Bind(instance), arguments, keywords));
+                Initialized(CallWithReceiver(function, instance, arguments, keywords));
                 break;
 
             // A decorator such as `@dataclass` installs a builtin `__init__`, which is
@@ -655,6 +655,32 @@ public sealed class VirtualMachine
         finally
         {
             _depth--;
+        }
+    }
+
+    /// <summary>
+    /// Calls a method with its receiver as the first argument, without making a bound
+    /// method for one call: the receiver and the arguments go into a rented buffer, which
+    /// binding copies out of before anything runs.
+    /// </summary>
+    internal PyObject CallWithReceiver(PyFunction function, PyObject receiver, PyObject[] arguments, PyDict? keywords)
+    {
+        if (function.BoundSelf is not null)
+        {
+            return CallFunction(function, arguments, keywords);
+        }
+
+        var buffer = System.Buffers.ArrayPool<PyObject>.Shared.Rent(arguments.Length + 1);
+
+        try
+        {
+            buffer[0] = receiver;
+            arguments.CopyTo(buffer, 1);
+            return CallFunction(function, buffer.AsSpan(0, arguments.Length + 1), keywords);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<PyObject>.Shared.Return(buffer, clearArray: true);
         }
     }
 
@@ -1499,6 +1525,65 @@ public sealed class VirtualMachine
                 return false;
             }
 
+            case OpCode.LoadMethod:
+            {
+                var target = frame.Pop();
+                var name = code.Names[instruction.Operand];
+
+                // A function on the class is not a data descriptor, so only an override of
+                // `__getattribute__` or an instance field of the same name could change
+                // what `instance.name` means; with neither, it is this function, bound.
+                if (target is PyInstance instance
+                    && instance.Class.Lookup(name) is PyFunction { BoundSelf: null } method
+                    && instance.Class.Lookup("__getattribute__") is not PyFunction
+                    && !instance.Fields.ContainsKey(name))
+                {
+                    frame.Push(method);
+                    frame.Push(instance);
+                    return false;
+                }
+
+                // `super().method(...)`, the other common shape: the function found past
+                // the current class, with the original receiver.
+                if (target is PySuper { Receiver: not PyClass } parent
+                    && parent.FindMember(name) is PyFunction { BoundSelf: null } inherited)
+                {
+                    frame.Push(inherited);
+                    frame.Push(parent.Receiver);
+                    return false;
+                }
+
+                frame.Push(Attributes.Get(this, target, name));
+                frame.Push(MethodMarker.Instance);
+                return false;
+            }
+
+            case OpCode.CallMethod:
+            {
+                var count = instruction.Operand;
+                var stack = frame.Stack;
+                var start = stack.Count - count;
+                var receiver = stack[start - 1];
+                var callable = stack[start - 2];
+                PyObject returned;
+
+                if (receiver is MethodMarker)
+                {
+                    returned = callable is PyFunction function
+                        ? CallFunction(function, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count), null)
+                        : Call(callable, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count).ToArray());
+                }
+                else
+                {
+                    // The receiver sits just below the arguments, so it is the first of them.
+                    returned = CallFunction((PyFunction)callable, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start - 1, count + 1), null);
+                }
+
+                stack.RemoveRange(start - 2, count + 2);
+                frame.Push(returned);
+                return false;
+            }
+
             case OpCode.LoadAttr:
             {
                 var target = frame.Pop();
@@ -1512,6 +1597,13 @@ public sealed class VirtualMachine
                 var target = frame.Pop();
                 var value = frame.Pop();
                 var name = code.Names[instruction.Operand];
+
+                // `self.x = v` on an ordinary instance: the field is keyed by the name object
+                // the code already holds, rather than by a new string object per instance.
+                if (target is PyInstance instance && instance.TrySetPlainField(name, code.NameKey(instruction.Operand), value))
+                {
+                    return false;
+                }
 
                 if (!target.SetAttribute(name, value))
                 {
@@ -2697,6 +2789,16 @@ public sealed class VirtualMachine
             ?? throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
         _ => throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
     };
+
+    /// <summary>The stack slot <c>LoadMethod</c> leaves empty when it found no plain method.</summary>
+    private sealed class MethodMarker : PyObject
+    {
+        public static MethodMarker Instance { get; } = new();
+
+        public override string TypeName => "NULL";
+
+        public override string Repr() => "<NULL>";
+    }
 
     /// <summary>Pops <paramref name="count"/> values into an array of exactly that size.</summary>
     private static PyObject[] PopArray(Frame frame, int count)

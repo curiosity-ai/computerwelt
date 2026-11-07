@@ -2003,10 +2003,25 @@ public sealed class Compiler
             return;
         }
 
-        CompileExpression(call.Function);
-
         var hasUnpacking = call.Arguments.Any(static a => a is Starred)
             || call.Keywords.Any(static k => k.Name is null);
+
+        // `obj.method(a, b)` — the commonest call there is — skips building a bound method.
+        if (call.Function is Parsing.Attribute method && call.Keywords.Count == 0 && !hasUnpacking)
+        {
+            CompileExpression(method.Value);
+            Emit(OpCode.LoadMethod, _code.AddName(method.AttributeName), method.Line);
+
+            foreach (var argument in call.Arguments)
+            {
+                CompileExpression(argument);
+            }
+
+            Emit(OpCode.CallMethod, call.Arguments.Count, call.Line);
+            return;
+        }
+
+        CompileExpression(call.Function);
 
         if (call.Keywords.Count == 0 && !hasUnpacking)
         {

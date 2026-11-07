@@ -93,6 +93,19 @@ public enum OpCode
     /// </summary>
     MatchClass,
 
+    /// <summary>
+    /// <c>obj.name</c> about to be called: pushes the function and the receiver when
+    /// <c>name</c> is a plain method of the instance's class (so no bound method is made),
+    /// otherwise the attribute and a marker.
+    /// </summary>
+    LoadMethod,
+
+    /// <summary>
+    /// Calls what <see cref="LoadMethod"/> pushed, with the operand's count of positional
+    /// arguments above it.
+    /// </summary>
+    CallMethod,
+
     /// <summary>Pop an object; delete the attribute named by the operand (<c>del obj.x</c>).</summary>
     DeleteAttr,
 

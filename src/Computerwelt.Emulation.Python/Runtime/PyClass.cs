@@ -238,11 +238,9 @@ public sealed class PyClass : PyCallable
 
     private PyObject? Walk(string name)
     {
-        var key = new PyStr(name);
-
         foreach (var type in _mro)
         {
-            if (type.Members.TryGetValue(key, out var value))
+            if (type.Members.TryGetValue(name, out var value))
             {
                 return value;
             }
@@ -915,7 +913,7 @@ public sealed class PyInstance : PyObject
         // there is one, is the answer.
         if (Class.HasPlainAttributes)
         {
-            return Fields.TryGetValue(new PyStr(name), out var own) ? own : RawGetAttribute(name);
+            return Fields.TryGetValue(name, out var own) ? own : RawGetAttribute(name);
         }
 
         if (Class.Lookup("__getattribute__") is PyFunction custom && _machine is { } machine)
@@ -951,7 +949,7 @@ public sealed class PyInstance : PyObject
             return ClassModel.BindToInstance(machine, classAttribute, this, Class);
         }
 
-        if (Fields.TryGetValue(new PyStr(name), out var field))
+        if (Fields.TryGetValue(name, out var field))
         {
             return field;
         }
@@ -1001,6 +999,24 @@ public sealed class PyInstance : PyObject
         return RawSetAttribute(name, value);
     }
 
+    /// <summary>
+    /// Stores a field directly when nothing could intercept the assignment — no
+    /// <c>__setattr__</c> and no descriptor of that name on the class — keyed by
+    /// <paramref name="key"/>; returns false to take the general path.
+    /// </summary>
+    internal bool TrySetPlainField(string name, PyStr key, PyObject value)
+    {
+        if (Class.Lookup("__setattr__") is not null
+            || (Class.Lookup(name) is { } member && (member is PyProperty || member is PyInstance))
+            || name == "__class__")
+        {
+            return false;
+        }
+
+        Fields.Set(key, value);
+        return true;
+    }
+
     /// <summary><c>object.__setattr__</c>: assignment without any user override.</summary>
     internal bool RawSetAttribute(string name, PyObject value)
     {
@@ -1030,7 +1046,7 @@ public sealed class PyInstance : PyObject
             throw new PyRaise(PyErrors.TypeError("__class__ assignment is not supported"));
         }
 
-        Fields.Set(new PyStr(name), value);
+        Fields.Set(name, value);
         return true;
     }
 
