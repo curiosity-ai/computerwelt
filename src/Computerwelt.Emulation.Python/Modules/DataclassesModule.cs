@@ -276,7 +276,7 @@ public static class DataclassesModule
 
     private static List<Field>? FieldsOf(PyClass type)
     {
-        foreach (var owner in type.Mro)
+        foreach (var owner in type.MroList)
         {
             if (FieldTable.TryGetValue(owner, out var fields))
             {
@@ -405,10 +405,14 @@ public static class DataclassesModule
 
         bool Own(string name) => type.Members.TryGetValue(new PyStr(name), out _);
 
+        // What the generated `__init__` binds, worked out once rather than on every call.
+        var initialized = fields.Where(static f => f.Init).ToList();
+        var positionalFields = initialized.Where(static f => !f.KwOnly).ToList();
+
         if (options.Init && !Own("__init__"))
         {
             type.SetAttribute("__init__", Method(type, "__init__", (arguments, keywords) =>
-                Initialize(machine, type, fields, arguments, keywords)));
+                Initialize(machine, type, fields, initialized, positionalFields, arguments, keywords)));
         }
 
         var shown = fields.Where(static f => f.Repr).Select(static f => f.Name).ToList();
@@ -565,13 +569,18 @@ public static class DataclassesModule
     private static string AnnotationText(PyObject annotation) => annotation is PyStr text ? text.Value : annotation.Repr();
 
     /// <summary>Binds the constructor arguments to the fields, as CPython's generated one does.</summary>
-    private static PyObject Initialize(VirtualMachine machine, PyClass type, List<Field> fields, PyObject[] arguments, PyDict? keywords)
+    private static PyObject Initialize(
+        VirtualMachine machine,
+        PyClass type,
+        List<Field> fields,
+        List<Field> parameters,
+        List<Field> ordered,
+        PyObject[] arguments,
+        PyDict? keywords)
     {
         var instance = arguments[0];
-        var positional = arguments[1..];
-        var parameters = fields.Where(static f => f.Init).ToList();
-        var ordered = parameters.Where(static f => !f.KwOnly).ToList();
-        var bound = new Dictionary<string, PyObject>(StringComparer.Ordinal);
+        var positional = arguments.AsSpan(1);
+        Dictionary<string, PyObject>? bound = keywords is { Count: > 0 } ? new(StringComparer.Ordinal) : null;
 
         // Keywords bind first, so an unexpected one is reported before an arity error.
         foreach (var (key, value) in keywords?.Entries ?? [])
@@ -592,7 +601,7 @@ public static class DataclassesModule
                     $"{type.Name}.__init__() got multiple values for argument '{name}'"));
             }
 
-            bound[name] = value;
+            bound![name] = value;
         }
 
         if (positional.Length > ordered.Count)
@@ -605,8 +614,8 @@ public static class DataclassesModule
                   + $"but {positional.Length + 1} were given"));
         }
 
-        var missing = new List<string>();
-        var missingKeywords = new List<string>();
+        List<string>? missing = null;
+        List<string>? missingKeywords = null;
 
         foreach (var field in fields)
         {
@@ -626,13 +635,21 @@ public static class DataclassesModule
                 var index = ordered.IndexOf(field);
 
                 value = index >= 0 && index < positional.Length ? positional[index]
-                    : bound.TryGetValue(field.Name, out var keyword) ? keyword
+                    : bound is not null && bound.TryGetValue(field.Name, out var keyword) ? keyword
                     : field.DefaultFactory is { } factory ? machine.Call(factory, [])
                     : field.Default;
 
                 if (value is null)
                 {
-                    (field.KwOnly ? missingKeywords : missing).Add(field.Name);
+                    if (field.KwOnly)
+                    {
+                        (missingKeywords ??= []).Add(field.Name);
+                    }
+                    else
+                    {
+                        (missing ??= []).Add(field.Name);
+                    }
+
                     continue;
                 }
             }
@@ -649,14 +666,14 @@ public static class DataclassesModule
             }
         }
 
-        if (missing.Count > 0)
+        if (missing is { Count: > 0 })
         {
             throw new PyRaise(PyErrors.TypeError(
                 $"{type.Name}.__init__() missing {missing.Count} required positional "
                 + $"argument{(missing.Count == 1 ? string.Empty : "s")}: {Join(missing)}"));
         }
 
-        if (missingKeywords.Count > 0)
+        if (missingKeywords is { Count: > 0 })
         {
             throw new PyRaise(PyErrors.TypeError(
                 $"{type.Name}.__init__() missing {missingKeywords.Count} required keyword-only "
@@ -735,7 +752,10 @@ public static class DataclassesModule
         return PyBool.True;
     }
 
-    /// <summary>The generated ordering methods: the fields compared as tuples.</summary>
+    /// <summary>
+    /// The generated ordering methods: the fields compared as tuples would be — the first
+    /// pair that differs decides — without building the two tuples per comparison.
+    /// </summary>
     private static PyObject Order(PyClass type, List<string> names, PyObject left, PyObject right, string op)
     {
         _ = type;
@@ -745,11 +765,20 @@ public static class DataclassesModule
             return Builtins.NotImplementedSingleton.Instance;
         }
 
-        var a = new PyTuple([.. names.Select(name => Read(left, name))]);
-        var b = new PyTuple([.. names.Select(name => Read(right, name))]);
-        return Operators.Compare(op, a, b);
-    }
+        foreach (var name in names)
+        {
+            var a = Read(left, name);
+            var b = Read(right, name);
 
+            if (!PyObject.SameOrEqual(a, b))
+            {
+                return Operators.Compare(op, a, b);
+            }
+        }
+
+        // Every field equal: the tuples were equal, so only the inclusive orders hold.
+        return PyBool.Of(op is "<=" or ">=");
+    }
     private static System.Numerics.BigInteger HashOf(List<string> names, PyObject instance) =>
         new PyTuple([.. names.Select(name => Read(instance, name))]).PyHash();
 

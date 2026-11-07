@@ -116,7 +116,7 @@ internal sealed partial class NdArray : IPyOperand
             throw new PyRaise(PyErrors.TypeError("only length-1 arrays can be converted to Python scalars"));
         }
 
-        var value = GetBoxed(Offsets()[0]);
+        var value = GetBoxed(Offset);
 
         return conversion switch
         {

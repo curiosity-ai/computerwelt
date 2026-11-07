@@ -145,6 +145,9 @@ public sealed class PyClass : PyCallable
     /// <summary>The method resolution order: this class first, then its Python bases.</summary>
     public IReadOnlyList<PyClass> Mro => _mro;
 
+    /// <summary>The MRO as its list, so a loop over it enumerates without boxing.</summary>
+    internal List<PyClass> MroList => _mro;
+
     /// <summary>The built-in type instances of this class extend, if any.</summary>
     public PyType? BuiltinBase { get; private set; }
 
@@ -626,12 +629,9 @@ public sealed class PyInstance : PyObject
     /// </remarks>
     public override BigInteger PyHash()
     {
-        var hashKey = new PyStr("__hash__");
-        var equalsKey = new PyStr("__eq__");
-
-        foreach (var type in Class.Mro)
+        foreach (var type in Class.MroList)
         {
-            if (type.Members.TryGetValue(hashKey, out var hash))
+            if (type.Members.TryGetValue("__hash__", out var hash))
             {
                 if (hash is PyNone)
                 {
@@ -641,7 +641,7 @@ public sealed class PyInstance : PyObject
                 return Dunder("__hash__") is { } method ? HashValue(Invoke(method, [])) : Identity();
             }
 
-            if (type.Members.TryGetValue(equalsKey, out _))
+            if (type.Members.TryGetValue("__eq__", out _))
             {
                 throw new PyRaise(PyErrors.TypeError($"unhashable type: '{Class.Name}'"));
             }

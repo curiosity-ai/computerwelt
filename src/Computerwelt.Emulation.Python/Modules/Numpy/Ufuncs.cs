@@ -88,15 +88,29 @@ internal static class Ufuncs
     public static NdArray BinaryArray(string name, NdArray x, NdArray y)
     {
         var shape = NdArray.BroadcastShapes(x.Shape, y.Shape);
-        NdArray.CheckedSize(shape);
-        var ox = x.BroadcastTo(shape).Offsets();
-        var oy = y.BroadcastTo(shape).Offsets();
-        var n = ox.Length;
+        var n = NdArray.CheckedSize(shape);
 
+        // The position lists are scratch for this one loop, so they are rented.
+        var ox = x.BroadcastTo(shape).RentOffsets();
+        var oy = y.BroadcastTo(shape).RentOffsets();
+
+        try
+        {
+            return BinaryArray(name, x, y, shape, ox, oy, n);
+        }
+        finally
+        {
+            NdArray.ReturnOffsets(ox);
+            NdArray.ReturnOffsets(oy);
+        }
+    }
+
+    private static NdArray BinaryArray(string name, NdArray x, NdArray y, int[] shape, int[] ox, int[] oy, int n)
+    {
         switch (name)
         {
             case "equal" or "not_equal" or "less" or "less_equal" or "greater" or "greater_equal":
-                return FromBools(Comparison(name, x, y, ox, oy), shape);
+                return FromBools(Comparison(name, x, y, ox, oy, n), shape);
 
             case "logical_and" or "logical_or" or "logical_xor":
             {
@@ -166,11 +180,11 @@ internal static class Ufuncs
             switch (name)
             {
                 case "add" or "bitwise_or" or "maximum" or "fmax":
-                    return FromBools(Zip(x, y, ox, oy, static (a, b) => a || b), shape);
+                    return FromBools(Zip(x, y, ox, oy, n, static (a, b) => a || b), shape);
                 case "multiply" or "bitwise_and" or "minimum" or "fmin":
-                    return FromBools(Zip(x, y, ox, oy, static (a, b) => a && b), shape);
+                    return FromBools(Zip(x, y, ox, oy, n, static (a, b) => a && b), shape);
                 case "bitwise_xor":
-                    return FromBools(Zip(x, y, ox, oy, static (a, b) => a ^ b), shape);
+                    return FromBools(Zip(x, y, ox, oy, n, static (a, b) => a ^ b), shape);
                 case "subtract":
                     throw new PyRaise(PyErrors.TypeError(
                         "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, "
@@ -235,9 +249,9 @@ internal static class Ufuncs
 
     private static NdArray FromBools(bool[] values, int[] shape) => NdArray.FromBools(values, shape);
 
-    private static bool[] Zip(NdArray x, NdArray y, int[] ox, int[] oy, Func<bool, bool, bool> f)
+    private static bool[] Zip(NdArray x, NdArray y, int[] ox, int[] oy, int n, Func<bool, bool, bool> f)
     {
-        var result = new bool[ox.Length];
+        var result = new bool[n];
 
         for (var k = 0; k < result.Length; k++)
         {
@@ -247,9 +261,8 @@ internal static class Ufuncs
         return result;
     }
 
-    private static bool[] Comparison(string name, NdArray x, NdArray y, int[] ox, int[] oy)
+    private static bool[] Comparison(string name, NdArray x, NdArray y, int[] ox, int[] oy, int n)
     {
-        var n = ox.Length;
         var result = new bool[n];
         var kind = NdDType.Promote(x.Kind, y.Kind);
 

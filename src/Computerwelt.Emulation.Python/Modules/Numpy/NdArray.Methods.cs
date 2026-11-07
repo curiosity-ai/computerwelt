@@ -174,7 +174,7 @@ internal sealed partial class NdArray
         if (arguments.Length == 0)
         {
             return Size == 1
-                ? GetBoxed(Offsets()[0])
+                ? GetBoxed(Offset)
                 : throw new PyRaise(PyErrors.ValueError("can only convert an array of size 1 to a Python scalar"));
         }
 

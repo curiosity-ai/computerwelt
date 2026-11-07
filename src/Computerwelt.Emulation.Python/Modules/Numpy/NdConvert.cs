@@ -320,7 +320,7 @@ internal static class NdConvert
         var raw = value switch
         {
             PyInt integer => integer.Value,
-            NdArray { Size: 1, Kind: DKind.Int or DKind.Bool } array => new BigInteger(array.GetLong(array.Offsets()[0])),
+            NdArray { Size: 1, Kind: DKind.Int or DKind.Bool } array => new BigInteger(array.GetLong(array.Offset)),
             _ => throw new PyRaise(PyErrors.TypeError(
                 $"'{value.TypeName}' object cannot be interpreted as an integer")),
         };

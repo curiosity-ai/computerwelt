@@ -232,7 +232,7 @@ internal static class EnumModule
         new(name, (arguments, _) => body(arguments)) { BindsAsMethod = true, Kind = "function" };
 
     private static PyObject FieldOf(PyObject member, string name) =>
-        member is PyInstance instance && instance.Fields.TryGetValue(new PyStr(name), out var value) ? value : PyNone.Instance;
+        member is PyInstance instance && instance.Fields.TryGetValue(name, out var value) ? value : PyNone.Instance;
 
     private static string? Name(PyInstance member) => FieldOf(member, "_name_") is PyStr name ? name.Value : null;
 

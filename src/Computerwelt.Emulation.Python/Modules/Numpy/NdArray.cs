@@ -268,15 +268,37 @@ internal sealed partial class NdArray : PyObject
         }
     }
 
+    /// <summary>
+    /// The buffer position of every element, in row-major order, in an array rented from
+    /// <see cref="System.Buffers.ArrayPool{T}.Shared"/> — longer than <see cref="Size"/>
+    /// perhaps, so read only the first <see cref="Size"/> entries — to be handed back with
+    /// <see cref="ReturnOffsets"/>. For the element loops every operator runs, where the
+    /// position list is scratch that lives for one call.
+    /// </summary>
+    public int[] RentOffsets()
+    {
+        var size = Size;
+        var result = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(size, 1));
+        FillOffsets(result, size);
+        return result;
+    }
+
+    /// <summary>Hands back an array from <see cref="RentOffsets"/>.</summary>
+    public static void ReturnOffsets(int[] offsets) => System.Buffers.ArrayPool<int>.Shared.Return(offsets);
+
     /// <summary>The buffer position of every element, in row-major order.</summary>
     public int[] Offsets()
     {
-        var size = Size;
-        var result = new int[size];
+        var result = new int[Size];
+        FillOffsets(result, Size);
+        return result;
+    }
 
+    private void FillOffsets(int[] result, int size)
+    {
         if (size == 0)
         {
-            return result;
+            return;
         }
 
         if (IsContiguous)
@@ -286,7 +308,7 @@ internal sealed partial class NdArray : PyObject
                 result[k] = Offset + k;
             }
 
-            return result;
+            return;
         }
 
         var nd = NDim;
@@ -311,8 +333,6 @@ internal sealed partial class NdArray : PyObject
                 index[d] = 0;
             }
         }
-
-        return result;
     }
 
     public double GetDouble(int position) => Kind switch
@@ -405,7 +425,7 @@ internal sealed partial class NdArray : PyObject
     {
         PyFloat number => number.Value,
         PyInt integer => Numbers.ToDouble(integer.Value),
-        NdArray { Size: 1 } array => array.GetDouble(array.Offsets()[0]),
+        NdArray { Size: 1 } array => array.GetDouble(array.Offset),
         PyStr text => double.TryParse(text.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : text.Value.Trim().ToLowerInvariant() switch
@@ -437,7 +457,7 @@ internal sealed partial class NdArray : PyObject
                 return FloatToLong(number.Value);
 
             case NdArray { Size: 1 } array:
-                return array.GetLong(array.Offsets()[0]);
+                return array.GetLong(array.Offset);
 
             case PyStr text when long.TryParse(text.Value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed):
                 return parsed;
@@ -479,14 +499,15 @@ internal sealed partial class NdArray : PyObject
             return Buffer.F!.AsSpan(Offset, Size).ToArray();
         }
 
-        var offsets = Offsets();
-        var result = new double[offsets.Length];
+        var offsets = RentOffsets();
+        var result = new double[Size];
 
-        for (var k = 0; k < offsets.Length; k++)
+        for (var k = 0; k < result.Length; k++)
         {
             result[k] = GetDouble(offsets[k]);
         }
 
+        ReturnOffsets(offsets);
         return result;
     }
 
@@ -497,40 +518,43 @@ internal sealed partial class NdArray : PyObject
             return Buffer.I!.AsSpan(Offset, Size).ToArray();
         }
 
-        var offsets = Offsets();
-        var result = new long[offsets.Length];
+        var offsets = RentOffsets();
+        var result = new long[Size];
 
-        for (var k = 0; k < offsets.Length; k++)
+        for (var k = 0; k < result.Length; k++)
         {
             result[k] = GetLong(offsets[k]);
         }
 
+        ReturnOffsets(offsets);
         return result;
     }
 
     public bool[] ToBools()
     {
-        var offsets = Offsets();
-        var result = new bool[offsets.Length];
+        var offsets = RentOffsets();
+        var result = new bool[Size];
 
-        for (var k = 0; k < offsets.Length; k++)
+        for (var k = 0; k < result.Length; k++)
         {
             result[k] = GetBool(offsets[k]);
         }
 
+        ReturnOffsets(offsets);
         return result;
     }
 
     public PyObject[] ToBoxed()
     {
-        var offsets = Offsets();
-        var result = new PyObject[offsets.Length];
+        var offsets = RentOffsets();
+        var result = new PyObject[Size];
 
-        for (var k = 0; k < offsets.Length; k++)
+        for (var k = 0; k < result.Length; k++)
         {
             result[k] = GetBoxed(offsets[k]);
         }
 
+        ReturnOffsets(offsets);
         return result;
     }
 
@@ -803,7 +827,7 @@ internal sealed partial class NdArray : PyObject
     {
         if (Size == 1)
         {
-            return GetBool(Offsets()[0]);
+            return GetBool(Offset);
         }
 
         throw new PyRaise(PyErrors.ValueError(Size == 0
@@ -865,7 +889,7 @@ internal sealed partial class NdArray : PyObject
         // A one-element array formats as its element; anything else refuses, as numpy's does.
         if (Size == 1)
         {
-            return StringFormatter.Format(GetBoxed(Offsets()[0]), spec);
+            return StringFormatter.Format(GetBoxed(Offset), spec);
         }
 
         throw new PyRaise(PyErrors.TypeError("unsupported format string passed to numpy.ndarray.__format__"));

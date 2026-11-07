@@ -190,21 +190,34 @@ internal sealed class PdGroupBy : PyObject
         var groups = new List<(PyObject Key, List<int> Rows, int First)>();
         var rows = _frame.RowCount;
 
+        // One buffer for the key parts of every row; a list is made only for a row that
+        // starts a new group, since only that row's parts become a label.
+        var width = _keys.Count;
+        var parts = new PyObject[width];
+
         for (var r = 0; r < rows; r++)
         {
-            var parts = _keys.Select(k => k.Values[r]).ToList();
+            var missing = false;
 
-            if (_dropna && parts.Any(Pd.IsMissing))
+            for (var k = 0; k < width; k++)
+            {
+                parts[k] = _keys[k].Values[r];
+                missing |= Pd.IsMissing(parts[k]);
+            }
+
+            if (_dropna && missing)
             {
                 continue;
             }
 
-            var key = PdOps.RowKey(parts);
+            var key = width == 1
+                ? new PyKey(PdOps.Normalize(parts[0]))
+                : PdOps.RowKey(parts);
 
             if (!lookup.TryGetValue(key, out var at))
             {
                 lookup[key] = at = groups.Count;
-                var label = parts.Count == 1 && !_tupleKeys ? parts[0] : new PyTuple(parts);
+                var label = width == 1 && !_tupleKeys ? parts[0] : new PyTuple([.. parts]);
                 groups.Add((label, [], r));
             }
 
