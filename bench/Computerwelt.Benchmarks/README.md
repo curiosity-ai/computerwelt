@@ -101,9 +101,10 @@ otherwise; the sandbox is single-threaded by design. The table below is the defa
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 bench/Computerwelt.Benchmarks/cpython_compare.py --out cpython-1t.json
 ```
 
-Only the BLAS-backed rows move: `np_matmul` goes from 459 µs to 867 µs (2.4× instead of
-4.6×), `np_linalg` from 706 to 757 µs; element-wise ufuncs and reductions are
-single-threaded in numpy either way.
+Only the BLAS-backed rows move: numpy's `np_matmul` goes from 459 µs to 867 µs and
+`np_linalg` from 706 to 757 µs; element-wise ufuncs and reductions are single-threaded in
+numpy either way. Against one BLAS thread the sandbox's `np_matmul` is 1.6×, against all
+four 3.0×.
 
 Both sides take the median of runs repeated for about a second after a warm-up (twenty runs
 on the .NET side, which also lets the JIT tier up); CPython's fresh column is the median of
@@ -131,7 +132,7 @@ where repeating a run moves a row by 10–30%.
 | `np_int_math` (1M int64) | 10.17 ms | 98.90 ms | 9.53 ms | 6.40 ms | 1.5× |
 | `np_masks` (1M, compare, `&`, `a[m]`, `where`) | 34.37 ms | 108.90 ms | 37.45 ms | 19.96 ms | 1.9× |
 | `np_reductions` (1M, whole and per-axis) | 19.39 ms | 96.37 ms | 18.25 ms | 9.49 ms | 1.9× |
-| `np_matmul` (200×200 products) | 2.31 ms | 84.62 ms | 2.11 ms | 459 µs | 4.6× |
+| `np_matmul` (200×200 products) | 1.50 ms | 84.62 ms | 1.37 ms | 459 µs | 3.0× |
 | `np_linalg` (`inv`, `solve`, `det` at 120×120) | 1.53 ms | 85.18 ms | 1.18 ms | 706 µs | 1.7× |
 | `pandas_groupby` (2,000 rows) | 1.14 ms | 308.95 ms | 945 µs | 2.37 ms | 0.4× |
 | `pd_numeric` (100,000 rows) | 106.91 ms | 458.93 ms | 108.59 ms | 30.63 ms | 3.5× |
@@ -151,9 +152,10 @@ where repeating a run moves a row by 10–30%.
 - **numpy on a million elements is 1.4–1.9× behind real numpy**, both running vectorised
   kernels; what is left is mostly allocation (every intermediate is a fresh 8 MB array the
   GC has to clear and collect) and the first calls of each kernel, below. **Matrix products
-  are 4.6× behind a multi-threaded BLAS and 2.4× behind a single-threaded one**: the rest is
-  OpenBLAS' AVX-512 kernels against our AVX2-width one; this sandbox will not spread one
-  tenant's program over the host's cores.
+  are 3.0× behind a multi-threaded BLAS and 1.6× behind a single-threaded one**; the kernel
+  alone reaches about 50 GFLOPS on one core here against OpenBLAS' 55–58, and the rest is
+  the operations around it. This sandbox will not spread one tenant's program over the
+  host's cores.
 - **pandas is faster than real pandas on a small frame** (per-call overhead dominates at
   2,000 rows) and 3.5× behind on 100,000 rows — where most of the sandbox's time is the
   workload building its three columns as Python list comprehensions, which is the
@@ -172,7 +174,7 @@ the real packages, on the workloads above:
 | `np_int_math` | 6.8× | 1.5× |
 | `np_masks` | 5.1× | 1.9× |
 | `np_reductions` | 8.1× | 1.9× |
-| `np_matmul` | 31.9× | 4.6× (2.4× against one BLAS thread) |
+| `np_matmul` | 31.9× | 3.0× (1.6× against one BLAS thread) |
 | `np_linalg` | 6.9× | 1.7× |
 | `numpy_array` | 13.2× | 1.8× |
 | `pd_numeric` | 4.1× | 3.5× |
@@ -189,8 +191,17 @@ What does the work:
 - **Reductions** over the whole array, the leading axes (row-wise vector adds, as numpy does)
   or the trailing axes (each output one contiguous run) read the buffer in place
   (`Reductions.Simd.cs`).
-- **Matrix products** above 2^14 multiply-adds use a packed GEMM with a 4×8 block of
-  `Vector256` FMA accumulators (`LinAlg.Gemm.cs`); `inv` and `solve` update whole rows.
+- **Matrix products** above 2^14 multiply-adds use a packed GEMM (`LinAlg.Gemm.cs`): an
+  8×16 block of the result in sixteen `Vector512` FMA accumulators where AVX-512 is
+  accelerated, a 4×8 block in eight `Vector256` ones elsewhere. The inner loops are kept free
+  of calls: with one after the loop, the JIT kept the 512-bit accumulators on the stack and
+  reloaded them every iteration, which ran at 20 GFLOPS instead of 50. `inv` and `solve`
+  update whole rows.
+- **Strided and broadcast operands** — a row or a column spread over a matrix
+  (`x - x.mean(axis=0)`), a transpose, a stepped slice — no longer fall to the per-element
+  loop: a row or column is applied row by row without a copy, a transposed array is
+  processed in memory order and its result keeps that layout (numpy's default order does
+  the same), and anything else is gathered once.
 - **pandas columns** hold `double[]`/`long[]`/`bool[]` and box only when something reads
   them one object at a time, so column arithmetic, comparison, masks, reductions and
   single-key groupby never touch a `PyObject` (`Modules/Pandas/PdVector.cs`).
@@ -205,7 +216,7 @@ paths they always took, so the small results a program prints are unchanged. Abo
 | `+ - * /`, comparisons, `sqrt`, `abs`, `floor`, min/max, masks, `where`, int64 anything | none: single IEEE operations either way |
 | `exp`, `log`, `sin`, `tanh`, `arctan2`, … | the vectorised implementations' few ulps (fixture: within 1e-12 relative) |
 | `sum`, `mean`, `var`, `std` | a different association than numpy's eight-way pairwise blocks: last digits |
-| matrix products | sums in FMA over 256-deep blocks, as BLAS does: last digits; integer-valued data exact |
+| matrix products | sums in FMA over 128- or 256-deep blocks, as BLAS does: last digits; integer-valued data exact |
 | pandas reductions | none: numpy's pairwise sum, now as two vector accumulators, bit for bit |
 | `x ** y` | none: `TensorPrimitives.Pow` is exact. `exp(y·log x)` was 1.8× faster and rejected, because it printed `4.0 ** 1.5` as `7.999999999999998` |
 

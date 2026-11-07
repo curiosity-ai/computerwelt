@@ -305,7 +305,7 @@ one to two orders of magnitude (no process; CPython needs ~11 ms before its firs
 90–390 ms to import numpy or pandas). Warm — a notebook cell against a Jupyter-style `exec` —
 pure-Python code runs 1.3–9× slower than CPython 3.13, closer where the work is in library
 code; numpy and pandas on large arrays run 1.4–2× behind the real packages, whose kernels are
-C and BLAS, with SIMD kernels of our own (matrix products, single-threaded by design: 2.4× behind one OpenBLAS thread, 4.6× behind all of them).
+C and BLAS, with SIMD kernels of our own (matrix products, single-threaded by design: 1.6× behind one OpenBLAS thread, 3.0× behind all of them).
 The method, the twenty shared workloads and the full table are in
 [`bench/Computerwelt.Benchmarks/README.md`](bench/Computerwelt.Benchmarks/README.md#compared-with-cpython).
 

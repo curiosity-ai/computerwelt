@@ -786,7 +786,7 @@ and compile of a session cell, which is most of `SessionCell`.
 ## Performance — numpy and pandas, SIMD round
 
 Warm ratios against the real packages went from 5–32× to 1.4–1.9× on million-element numpy
-work, 4.6× for matrix products (2.4× against single-threaded OpenBLAS) and 3.5× on a 100,000-row pandas frame (table, method and
+work, 3.0× for matrix products (1.6× against single-threaded OpenBLAS) and 3.5× on a 100,000-row pandas frame (table, method and
 the accuracy notes in `bench/Computerwelt.Benchmarks/README.md`, "The numeric kernels").
 
 - **numpy element-wise** (`NdSimd.cs`): contiguous operands of 64+ elements, or a scalar,
@@ -798,10 +798,15 @@ the accuracy notes in `bench/Computerwelt.Benchmarks/README.md`, "The numeric ke
   `sum`, eight mask bytes per test.
 - **Reductions** (`Reductions.Simd.cs`): whole array, leading axes and trailing axes, for
   `sum`, `mean`/`var`/`std`, `min`/`max`, `argmin`/`argmax`; `norm` is a dot product.
-- **Matrix products** (`LinAlg.Gemm.cs`): packed 4×8 `Vector256` FMA GEMM above 2^14
+- **Matrix products** (`LinAlg.Gemm.cs`): packed 8×16 `Vector512` FMA GEMM on AVX-512
+  (128-deep strips), 4×8 `Vector256` elsewhere, above 2^14
   multiply-adds, dot products for matrix-vector, row axpys for vector-matrix, i-k-j int64.
   Single-threaded on purpose. LU and the triangular solves update rows with `MultiplyAdd`,
   rounding exactly as the scalar loops did.
+- **Strided operands** (`NdSimd.Rows`, `SharedLayout`, `Dense`): a row or column
+  broadcast over a matrix runs row by row without a copy; a transposed (dense, permuted)
+  operand runs over its memory and the result keeps its layout; anything else is gathered
+  once with a strided copy per innermost run.
 - **pandas** (`PdCore.cs`, `PdVector.cs`): numeric columns are unboxed arrays, boxed on
   demand; operators, comparisons, `& | ^`, reductions, boolean selection, `Take` and
   single int/float-key groupby read them. `RangeIndex` is unboxed too. The pairwise sum is
@@ -812,14 +817,18 @@ the accuracy notes in `bench/Computerwelt.Benchmarks/README.md`, "The numeric ke
   `TieredCompilationQuickJitForLoops=false` (60–150 ms of start-up for full speed from the
   first call). Nothing in this repository sets it.
 
+The 512-bit GEMM first ran *slower* than the 256-bit one (20 vs 33 GFLOPS): the call after
+its loop made the JIT keep the accumulators on the stack. Moving the loop into a call-free
+method fixed it (50 GFLOPS); the 256-bit kernel gained from the same split.
+
 Tried and rejected: `x ** y` as `exp(y·log x)` (1.8× faster, but `4.0 ** 1.5` printed as
 `7.999999999999998`); spreading GEMM over cores (one tenant's program would take the host's
 CPUs).
 
 Still pointing somewhere: allocation — every intermediate of a million-element expression is
 a fresh 8 MB large-object array the GC clears and collects, which is most of what separates
-`np_elementwise` from numpy now; matrix products past what one core does (AVX-512 kernels
-would roughly double it where available); pandas columns built from Python lists, whose cost
+`np_elementwise` from numpy now; matrix products past what one core does (the kernel is at
+~90% of single-threaded OpenBLAS; the gap left is the work around it); pandas columns built from Python lists, whose cost
 is the interpreter; `groupby` on multiple or string keys, which still hashes boxed keys.
 
 ## Performance
