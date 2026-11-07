@@ -224,6 +224,10 @@ paths they always took, so the small results a program prints are unchanged. Abo
 every path at sizes that take it against a pure-Python computation, and pass under CPython
 with the real packages too.
 
+Per operation, `numeric_micro.py` times 35 numpy and pandas operations (element-wise,
+masks, reductions, broadcasting, products, `linalg`, Series and frame work) and runs
+unchanged under both interpreters; its header has the three commands.
+
 ### The first calls of a kernel
 
 .NET compiles a method at a low optimisation tier first and recompiles it once it is hot;
