@@ -1234,6 +1234,14 @@ internal static class NumpyModule
         var args = new NpArgs(name, arguments, keywords, "a", "axis", "dtype", "out", "ddof", "keepdims", "where", "mean", "correction", "overwrite_input");
         var array = args.Array("a");
         var ddof = args.Int("ddof", args.Int("correction", 0));
+
+        if (name is "mean" or "std" or "var"
+            && args.Optional("dtype") is null or PyNone && args.Optional("out") is null or PyNone && args.Optional("where") is null or PyNone
+            && Reductions.TryMomentFast(name, array, Axes(args, array), args.Bool("keepdims", false), ddof) is { } fast)
+        {
+            return fast;
+        }
+
         return Reductions.MapFloat(array, Axes(args, array), args.Bool("keepdims", false), (values, pairwise) => reduce(values, pairwise, ddof));
     }
 

@@ -90,6 +90,11 @@ internal static class Ufuncs
         var shape = NdArray.BroadcastShapes(x.Shape, y.Shape);
         var n = NdArray.CheckedSize(shape);
 
+        if (NdSimd.TryBinary(name, x, y, shape, n) is { } vectorised)
+        {
+            return vectorised;
+        }
+
         // The position lists are scratch for this one loop, so they are rented.
         var ox = x.BroadcastTo(shape).RentOffsets();
         var oy = y.BroadcastTo(shape).RentOffsets();
@@ -485,6 +490,11 @@ internal static class Ufuncs
 
     public static NdArray UnaryArray(string name, NdArray x)
     {
+        if (NdSimd.TryUnary(name, x) is { } vectorised)
+        {
+            return vectorised;
+        }
+
         var shape = (int[])x.Shape.Clone();
         var n = x.Size;
 

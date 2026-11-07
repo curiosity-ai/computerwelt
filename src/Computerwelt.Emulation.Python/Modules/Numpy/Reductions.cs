@@ -12,7 +12,7 @@ namespace Computerwelt.Emulation.Python.Modules.Numpy;
 /// own loops do — so <c>np.sum([0.1] * 10)</c> is <c>1.0</c> here as there, where Python's
 /// <c>sum</c> gives <c>0.9999999999999999</c>.
 /// </remarks>
-internal static class Reductions
+internal static partial class Reductions
 {
     /// <summary>The elements regrouped so each output element's inputs are one contiguous run.</summary>
     internal sealed record Groups(NdArray Data, int[] Shape, int[] KeptShape, int GroupSize, int Count, bool Contiguous);
@@ -102,6 +102,11 @@ internal static class Reductions
 
     public static PyObject Sum(NdArray array, int[]? axes, bool keepDims, NdDType? dtype = null)
     {
+        if (TrySumFast(array, axes, keepDims, dtype) is { } fast)
+        {
+            return fast;
+        }
+
         var groups = Group(array, axes);
         var kind = dtype?.Kind ?? (array.Kind == DKind.Bool ? DKind.Int : array.Kind);
         var g = groups.GroupSize;
@@ -303,6 +308,11 @@ internal static class Reductions
             throw new PyRaise(PyErrors.ValueError($"zero-size array to reduction operation {name} which has no identity"));
         }
 
+        if (TryExtremeFast(array, axes, keepDims, smallest, ignoreNaN) is { } fast)
+        {
+            return fast;
+        }
+
         switch (array.Kind)
         {
             case DKind.Float:
@@ -430,6 +440,11 @@ internal static class Reductions
 
     private static long ArgOf(NdArray flat, int start, int count, bool smallest)
     {
+        if (FastArg(flat, start, count, smallest) is >= 0 and var fast)
+        {
+            return fast;
+        }
+
         var offsets = flat.Offsets();
 
         if (flat.Kind is DKind.Str or DKind.Object)

@@ -15,6 +15,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Vectorised span kernels (SIMD) behind numpy's element loops and reductions. -->
+    <PackageReference Include="System.Numerics.Tensors" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="Computerwelt.Emulation.Python.SpecTests" />
     <InternalsVisibleTo Include="Computerwelt.Emulation.Python.Tests" />
   </ItemGroup>
