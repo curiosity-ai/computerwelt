@@ -217,16 +217,19 @@ public sealed class PyBuiltinFunction : PyCallable
 /// <summary>A builtin bound to a receiver, as a method of a built-in type.</summary>
 public sealed class PyBoundMethod : PyCallable
 {
-    private readonly Func<PyObject, PyObject[], PyDict?, PyObject> _implementation;
+    private readonly Func<PyObject, PyObject[], PyDict?, PyObject>? _implementation;
+    private readonly Func<PyObject, PyObject[], PyObject>? _positional;
 
     /// <summary>Creates a bound method taking only positional arguments.</summary>
+    /// <remarks>
+    /// The delegate is kept as given rather than wrapped in one that rejects keywords:
+    /// a method is bound on every attribute access, and a wrapper would be a closure each time.
+    /// </remarks>
     public PyBoundMethod(string name, PyObject receiver, Func<PyObject, PyObject[], PyObject> implementation)
-        : this(name, receiver, (self, arguments, keywords) =>
-        {
-            PyBuiltinFunction.RejectKeywords(name, keywords);
-            return implementation(self, arguments);
-        })
     {
+        Name = name;
+        Receiver = receiver;
+        _positional = implementation;
     }
 
     /// <summary>Creates a bound method over <paramref name="receiver"/>.</summary>
@@ -249,9 +252,28 @@ public sealed class PyBoundMethod : PyCallable
     /// <inheritdoc />
     public override string Repr() => $"<built-in method {Name} of {Receiver.TypeName} object>";
 
+    /// <summary>The fewest positional arguments the method takes, when it checks.</summary>
+    internal int Minimum { get; init; }
+
+    /// <summary>The most positional arguments the method takes, when it checks.</summary>
+    internal int Maximum { get; init; } = int.MaxValue;
+
     /// <summary>Invokes the method.</summary>
-    public PyObject Invoke(PyObject[] arguments, PyDict? keywords = null) =>
-        _implementation(Receiver, arguments, keywords);
+    public PyObject Invoke(PyObject[] arguments, PyDict? keywords = null)
+    {
+        if (arguments.Length < Minimum || arguments.Length > Maximum)
+        {
+            throw new PyRaise(BuiltinMethods.ArityError(Name, Receiver, arguments.Length, Minimum, Maximum));
+        }
+
+        if (_positional is { } positional)
+        {
+            PyBuiltinFunction.RejectKeywords(Name, keywords);
+            return positional(Receiver, arguments);
+        }
+
+        return _implementation!(Receiver, arguments, keywords);
+    }
 }
 
 /// <summary>

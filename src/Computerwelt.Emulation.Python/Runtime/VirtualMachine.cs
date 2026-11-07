@@ -235,16 +235,22 @@ public sealed class VirtualMachine
     public static VirtualMachine? Running => s_running;
 
     /// <summary>Makes this the running machine on this thread until the scope is disposed.</summary>
-    public IDisposable Enter()
+    public RunningScope Enter()
     {
         var previous = s_running;
         s_running = this;
         return new RunningScope(previous);
     }
 
-    private sealed class RunningScope(VirtualMachine? previous) : IDisposable
+    /// <summary>Puts the previous running machine back when disposed; a struct, so entering costs nothing.</summary>
+    public readonly struct RunningScope : IDisposable
     {
-        public void Dispose() => s_running = previous;
+        private readonly VirtualMachine? _previous;
+
+        internal RunningScope(VirtualMachine? previous) => _previous = previous;
+
+        /// <inheritdoc />
+        public void Dispose() => s_running = _previous;
     }
 
     /// <summary>
@@ -593,7 +599,7 @@ public sealed class VirtualMachine
     /// rather than in bytecode, so it has to charge the same budget or a cyclic structure
     /// would overflow the host stack instead of raising <c>RecursionError</c>.
     /// </remarks>
-    public IDisposable EnterRecursion()
+    public RecursionLevel EnterRecursion()
     {
         if (++_depth > RecursionLimit)
         {
@@ -605,9 +611,24 @@ public sealed class VirtualMachine
         return new RecursionLevel(this);
     }
 
-    private sealed class RecursionLevel(VirtualMachine machine) : IDisposable
+    /// <summary>
+    /// One level of host recursion, given back when disposed — a struct, so <c>using var</c>
+    /// over it allocates nothing on paths (a dataclass comparison) that run per element.
+    /// </summary>
+    public readonly struct RecursionLevel : IDisposable
     {
-        public void Dispose() => machine._depth--;
+        private readonly VirtualMachine? _machine;
+
+        internal RecursionLevel(VirtualMachine machine) => _machine = machine;
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_machine is not null)
+            {
+                _machine._depth--;
+            }
+        }
     }
 
     /// <summary>

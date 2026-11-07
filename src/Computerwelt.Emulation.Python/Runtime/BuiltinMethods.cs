@@ -61,28 +61,28 @@ public static class BuiltinMethods
         int minimum,
         int maximum,
         Func<PyObject, PyObject[], PyDict?, PyObject> implementation) =>
-        new(name, receiver, (self, arguments, keywords) =>
-        {
-            if (arguments.Length < minimum || arguments.Length > maximum)
-            {
-                // Three wordings, and which one a method uses is not a matter of taste: a
-                // fixed-arity method of a sequence type names its type and says "exactly";
-                // one with a range of arities uses the argument clinic's "at least"; every
-                // other method uses the older "expected" form. Scripts match on all three.
-                throw new PyRaise(PyErrors.TypeError(
-                    self is PyList or PyTuple or PyStr or PySet && minimum == maximum
-                        ? $"{self.TypeName}.{name}() takes exactly {(minimum == 1 ? "one argument" : minimum + " arguments")} ({arguments.Length} given)"
-                        : self is PyStr
-                            ? arguments.Length < minimum
-                                ? $"{name}() takes at least {minimum} positional argument{(minimum == 1 ? string.Empty : "s")} ({arguments.Length} given)"
-                                : $"{name}() takes at most {maximum} argument{(maximum == 1 ? string.Empty : "s")} ({arguments.Length} given)"
-                            : arguments.Length < minimum
-                                ? $"{name} expected at least {minimum} argument{(minimum == 1 ? string.Empty : "s")}, got {arguments.Length}"
-                                : $"{name} expected at most {maximum} argument{(maximum == 1 ? string.Empty : "s")}, got {arguments.Length}"));
-            }
+        // The arity travels with the bound method and is checked when it is called, so binding
+        // a method — which happens on every `s.split(...)` — makes no closure of its own.
+        new(name, receiver, implementation) { Minimum = minimum, Maximum = maximum };
 
-            return implementation(self, arguments, keywords);
-        });
+    /// <summary>The <c>TypeError</c> for a builtin method called with the wrong number of arguments.</summary>
+    /// <remarks>
+    /// Three wordings, and which one a method uses is not a matter of taste: a fixed-arity
+    /// method of a sequence type names its type and says "exactly"; one with a range of
+    /// arities uses the argument clinic's "at least"; every other method uses the older
+    /// "expected" form. Scripts match on all three.
+    /// </remarks>
+    internal static PyException ArityError(string name, PyObject self, int count, int minimum, int maximum) =>
+        PyErrors.TypeError(
+            self is PyList or PyTuple or PyStr or PySet && minimum == maximum
+                ? $"{self.TypeName}.{name}() takes exactly {(minimum == 1 ? "one argument" : minimum + " arguments")} ({count} given)"
+                : self is PyStr
+                    ? count < minimum
+                        ? $"{name}() takes at least {minimum} positional argument{(minimum == 1 ? string.Empty : "s")} ({count} given)"
+                        : $"{name}() takes at most {maximum} argument{(maximum == 1 ? string.Empty : "s")} ({count} given)"
+                    : count < minimum
+                        ? $"{name} expected at least {minimum} argument{(minimum == 1 ? string.Empty : "s")}, got {count}"
+                        : $"{name} expected at most {maximum} argument{(maximum == 1 ? string.Empty : "s")}, got {count}");
 
     /// <summary>
     /// Rejects more arguments than a method takes, counting positional and keyword together.

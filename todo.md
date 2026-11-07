@@ -712,6 +712,69 @@ Upstream: `lib.rs`, `tool.rs`, `tool_def.rs`, `tool_registry.rs`
 
 ---
 
+## Performance — the Python half, allocation round
+
+Measured with BenchmarkDotNet (`--job short`, MemoryDiagnoser) over `PythonBenchmarks.Run*`
+and the new `NotebookBenchmarks`, each a whole `PythonRunner.Run` (so start-up is in every
+row), before and after this round on the same container. The sources of each allocation were
+found with an in-process `GCAllocationTick` sampler, not guessed.
+
+| Benchmark | Before (mean / allocated) | After (mean / allocated) |
+|---|---|---|
+| RunHelloWorld | 74 µs / 174 KB | 11 µs / 37 KB |
+| RunFibonacci (`fib(18)`) | 3,635 µs / 3,395 KB | 2,698 µs / 62 KB |
+| RunCalls | 1,034 µs / 1,122 KB | 699 µs / 172 KB |
+| RunNumericLoop | 1,856 µs / 911 KB | 1,558 µs / 500 KB |
+| RunTextProcessing | 1,001 µs / 1,015 KB | 884 µs / 767 KB |
+| RunMethods (classes, `super`, a property) | 4,561 µs / 6,088 KB | 2,194 µs / 720 KB |
+| RunDataclasses | 3,468 µs / 4,624 KB | 1,376 µs / 1,231 KB |
+| RunEnums | 1,860 µs / 1,594 KB | 1,410 µs / 544 KB |
+| RunMatch | 1,245 µs / 1,124 KB | 1,017 µs / 579 KB |
+| RunNumpy | 2,207 µs / 2,474 KB | 1,760 µs / 1,907 KB |
+| RunPandas | 1,367 µs / 1,292 KB | 1,188 µs / 765 KB |
+| SessionCell | 48 µs / 27 KB | 47 µs / 26 KB |
+
+What changed, by where the bytes were:
+
+- **Hoisted closures.** A lambda capturing a local makes the compiler allocate its closure on
+  entry to the declaring method, even when the lambda's branch is never taken. Three such
+  sites were on the hottest paths — the coroutine lambda in `CallFunction`, the error-reporting
+  LINQ in `BindArguments`, the set lambdas in `Operators.InPlace` — so every call and every
+  `+=` paid for one. Each now lives in a method of its own; `+=` also stopped slicing a fresh
+  `+` string per execution.
+- **Frames.** A plain function's frame cannot outlive its call, so finished frames are kept
+  per machine (`_framePool`, at most 256) with their stack and block lists, and their locals
+  are rented from `ArrayPool<PyObject?>.Shared` and returned cleared — cleared because the
+  pool is process-wide and a slot must never hand one tenant's object to another. Generator
+  and coroutine frames are excluded. A call from bytecode reads its arguments off the caller's
+  stack as a span; binding copies them before anything can run.
+- **Binding.** Positional calls of methods and calls relying on trailing defaults take the
+  fast path (defaults read once per function, `PyFunction.DefaultsByPosition`). A method no
+  longer copies its class body's cells into a dictionary per call unless its code reads a cell
+  (`CodeObject.ReadsEnclosingCells`) — a regression the inheritance round introduced, since
+  every method inherits the `__class__` cell.
+- **Method calls.** `obj.m(args)` compiles to `LoadMethod`/`CallMethod`: a function found on
+  the class (with no `__getattribute__` override and no instance field of that name) is
+  called with the receiver as its first argument, with no bound method made; `super().m()`
+  likewise, and instantiation passes the receiver to `__init__` through a rented buffer.
+  Builtin bound methods no longer wrap their delegate in an arity- or keyword-checking closure
+  per bind — `PyBoundMethod` checks itself.
+- **Name keys.** `PyDict` takes a plain `string` probe (`PyKey(string)` hashes as the `str`
+  would), so instance fields, class members and the MRO walk stop allocating a `PyStr` per
+  lookup; `self.x = v` keys the field with the code's cached name. `PyFunction`'s attribute
+  dictionary is made on first write.
+- **Start-up.** Every standard module is built on first import
+  (`StandardLibrary.CreateOnDemand`); host code that needs one goes through
+  `VirtualMachine.Import`. The builtins fill the machine's namespace directly, presized.
+- **Modules.** numpy's element loops rent their position lists (`NdArray.RentOffsets`); pandas'
+  groupby reuses one key buffer instead of a LINQ list, closure and delegate per row;
+  dataclass ordering compares field by field instead of building two tuples per comparison;
+  `EnterRecursion` and `VirtualMachine.Enter` return structs.
+
+Still pointing somewhere: the integer objects a loop over values past the small-int cache
+makes (most of `RunNumericLoop`), the strings text processing makes by nature, and the parse
+and compile of a session cell, which is most of `SessionCell`.
+
 ## Performance
 
 Measured with `bench/Computerwelt.Benchmarks/`, which carries bashkit's own 96-case corpus
