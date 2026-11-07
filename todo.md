@@ -23,14 +23,14 @@ directive.
 
 **Current state — python:** tokenizer, parser, bytecode compiler, VM, core types,
 builtins, the stdlib subset, dunder dispatch and the external-function boundary are all in
-place. **557 / 558 fixtures passing (99.8 %)**, with 40 unit tests covering what the
+place. **557 / 558 fixtures passing (99.8 %)**, with 112 unit tests covering what the
 corpus does not reach. No host exception escapes to a script.
 
-**Current state — joined:** 12 integration tests over one filesystem, and 210 green in
+**Current state — joined:** 26 integration tests over one filesystem (notebook sessions among them), and 244 green in
 `tests/Computerwelt.AgentTests/` — 153 covering the shell and Python operations a caller
 actually performs, plus upstream's 57 `python` command cases.
 
-**Extensions:** 26 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
+**Extensions:** 67 fixtures in `tests/monty-extensions/` cover behaviour upstream does not
 have. They are kept apart from upstream's corpus deliberately — see below.
 
 **Current state — browser:** `Computerwelt.Playwright` is a separate, optional package that
@@ -265,6 +265,35 @@ build at most 2^24 elements and do 2^30 element operations. Absent: numpy scalar
 (elements are Python numbers), complex dtypes, general `eig`/`svd`/`qr`, `out=`/`where=`,
 structured and datetime dtypes, file I/O. `default_rng` is deterministic but not PCG64.
 Eight `numpy__*.py` fixtures.
+
+### pandas  (`Modules/Pandas/`)
+
+A C# subset following pandas 2.2, built on first import. Series, DataFrame and Index;
+`[]`/`.loc`/`.iloc`/`.at`/`.iat` reads and writes; label-aligned arithmetic; reductions,
+rolling/expanding windows and missing-data methods; groupby (named aggregation,
+`transform`, `apply`), merge/join/concat, pivot/pivot_table/melt/crosstab/get_dummies/cut;
+`.str` and `.dt`; `read_csv`/`to_csv`/`read_json`/`to_json` over the VFS (a URL is refused);
+`query`/`eval` over a parser of its own that refuses dunders; text display with pandas'
+truncation and `_repr_html_`, so a session shows a frame as a table. `.values`/`to_numpy()`
+return numpy arrays. One call may build at most 2^24 cells. Eight `pandas__*.py` fixtures and
+`PandasHostTests`.
+
+It finds its run through `VirtualMachine.Running` (set for the span of a run, keyed by
+machine) rather than thread state of its own: a session's cells can land on different
+threads, and a pooled thread must never carry one tenant's pandas into another's run.
+`SessionTests` interleaves two sessions across thread-pool threads to pin this.
+
+Divergences: no real MultiIndex (multi-key results are tuple-labelled; level-wise operations
+are absent); copy-on-write semantics (pandas 3's rule); timestamps to the microsecond and
+`Timestamp - Timestamp` is a `datetime.timedelta`; stable sorts; rolling sums are not
+compensated; `read_json` does not parse dates; strings are `object` dtype. Absent:
+Categorical, Period, `ewm`, `resample`, tz-aware timestamps, `sample(weights=)`, `@var` in
+`query`, SQL/Excel/Parquet/pickle/HTTP.
+
+Operators for both packages go through one hook, `IPyOperand`: a host type answers binary,
+reflected, in-place, unary and comparison operators and `int()`/`float()`/`round()` itself,
+returning null for "not mine". `type(np.array([1])).__name__` reads `numpy.ndarray`, where
+CPython says `ndarray`.
 
 ## The browser add-on  (`src/Computerwelt.Playwright/`)
 
