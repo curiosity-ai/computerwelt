@@ -1578,7 +1578,10 @@ public sealed class Parser
                     {
                         _index++;
                         var delegating = Match("from");
-                        var value = IsExpressionEnd() ? null : ParseExpression();
+                        // `yield a, b` yields the tuple, as CPython parses it; only
+                        // `yield from` takes a single expression.
+                        var value = IsExpressionEnd() ? null
+                            : delegating ? ParseExpression() : ParseExpressionList();
                         return At(new Yield(value, delegating), token);
                     }
                 }

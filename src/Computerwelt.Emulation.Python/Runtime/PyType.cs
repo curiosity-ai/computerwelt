@@ -404,6 +404,9 @@ public static class TypeRegistry
         // A host record names its own type; the type object is made on demand and cached,
         // so `type(x) is type(y)` holds for two records of the same shape.
         PyDataclass record => Named(record.Name),
+        // A module's class (Decimal, Fraction, ZoneInfo, ...) names its own type object,
+        // which may be per run, so `type(x) is decimal.Decimal` holds within a run.
+        IPyHostTyped hosted => hosted.Type,
         // Anything else answers with a type object named for itself, made on demand and
         // cached, so `type(x) is type(y)` holds for two values of the same host type.
         _ => Named(value.TypeName),
@@ -538,7 +541,8 @@ public static class TypeRegistry
         {
             // A mapping is copied entry by entry; anything else is read as a sequence of
             // pairs.
-            var source = arguments[0] as PyDict;
+            // A module's mapping type (ChainMap, mappingproxy) copies as the dict it presents.
+            var source = arguments[0] as PyDict ?? (arguments[0] as IPyMapping)?.Snapshot();
 
             if (source is not null)
             {

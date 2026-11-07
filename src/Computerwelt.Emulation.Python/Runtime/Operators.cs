@@ -136,6 +136,12 @@ public static class Operators
         }
 
 
+        // A module's number type (Decimal, Fraction) answers for itself, on either side.
+        if ((left is IPyNumber || right is IPyNumber) && HostNumbers.Binary(op, left, right) is { } number)
+        {
+            return number;
+        }
+
         // A user class defines an operator by its dunder; the reflected form is tried when
         // the left operand does not implement the forward one.
         if ((left is PyInstance || right is PyInstance) && ArithmeticDunders.TryGetValue(op, out var dunders))
@@ -189,7 +195,8 @@ public static class Operators
     /// <summary>Applies a unary operator.</summary>
     public static PyObject Unary(string op, PyObject operand) =>
         (op != "not" && operand is IPyOperand own ? own.Unary(op) : null)
-        ?? PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
+        ?? PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand)
+        ?? (operand as IPyNumber)?.Unary(op) ?? Apply(op, operand);
 
     private static PyObject Apply(string op, PyObject operand) => op switch
     {
@@ -340,7 +347,7 @@ public static class Operators
             return PyBool.Of(right.PyEquals(left));
         }
 
-        return PyBool.Of(left.PyEquals(right));
+        return PyBool.Of(HostNumbers.Equal(left, right));
     }
 
     /// <summary>
@@ -386,7 +393,7 @@ public static class Operators
 
         try
         {
-            order = left.PyCompare(right);
+            order = HostNumbers.Compare(left, right);
         }
         catch (PyList.UnorderedPair pair)
         {
@@ -397,7 +404,7 @@ public static class Operators
         {
             // A NaN answers False to every comparison against another number; against a
             // non-number it is still a type mismatch, and says so.
-            return (IsNaN(a) && b is PyInt or PyFloat) || (IsNaN(b) && a is PyInt or PyFloat)
+            return (IsNaN(a) && b is PyInt or PyFloat or IPyNumber) || (IsNaN(b) && a is PyInt or PyFloat or IPyNumber)
                 ? PyBool.False
                 : throw new PyRaise(PyErrors.TypeError(
                     $"'{op}' not supported between instances of '{a.TypeName}' and '{b.TypeName}'"));

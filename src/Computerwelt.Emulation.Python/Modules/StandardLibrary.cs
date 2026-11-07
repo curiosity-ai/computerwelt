@@ -33,6 +33,15 @@ public static class StandardLibrary
     {
         var modules = Core(machine, timeProvider, arguments, standardInput);
 
+        // `secrets.SystemRandom` is `random.SystemRandom`, the same class object.
+        modules["secrets"] = SecretsModule.Create(modules["random"].GetAttribute("SystemRandom"));
+
+        // The compression modules work on bytes without a filesystem; `gzip.open` and
+        // `ZipFile` are present only when there is one to open files in.
+        modules["zlib"] = ZlibModule.Create();
+        modules["gzip"] = GzipModule.Create(fileSystem, machine, timeProvider ?? TimeProvider.System);
+        modules["zipfile"] = ZipfileModule.Create(fileSystem, machine, timeProvider ?? TimeProvider.System);
+
         // Time comes from the run's clock, so the module is built over it.
         modules["time"] = TimeModule.Create(timeProvider ?? TimeProvider.System);
 
@@ -146,11 +155,19 @@ public static class StandardLibrary
         ["binascii"] = EncodingModules.CreateBinascii(),
         ["base64"] = EncodingModules.CreateBase64(),
         ["uuid"] = UuidModule.Create(),
+        ["decimal"] = DecimalModule.Create(),
+        ["fractions"] = FractionsModule.Create(),
+        ["struct"] = StructModule.Create(),
+        ["types"] = TypesModule.Create(machine),
+        ["zoneinfo"] = ZoneinfoModule.Create(),
 
         // Exception classes the modules written in Python raise. Python source in this
         // interpreter cannot define an exception class of its own, so the class lives here.
         ["_hostexc"] = new PyModuleObject("_hostexc")
-            .Add("StatisticsError", HostExceptions.StatisticsError),
+            .Add("StatisticsError", HostExceptions.StatisticsError)
+            .Add("IllegalMonthError", HostExceptions.IllegalMonthError)
+            .Add("IllegalWeekdayError", HostExceptions.IllegalWeekdayError),
+        ["_warnings"] = WarningsSupport.Create(machine),
         ["asyncio"] = AsyncioModule.Create(machine),
         ["collections"] = SupportModules.CreateCollections(machine),
         ["itertools"] = SupportModules.CreateItertools(machine),
@@ -158,6 +175,10 @@ public static class StandardLibrary
         ["unicodedata"] = UnicodedataModule.Create(),
         ["typing"] = SupportModules.CreateTyping(),
         ["__future__"] = new PyModuleObject("__future__").Add("annotations", PyNone.Instance),
+
+        // `urllib.parse` is written in Python and built on first import; the package only
+        // has to answer for it once it exists.
+        ["urllib"] = new PyPackageObject("urllib", machine),
     };
 }
 
@@ -167,4 +188,12 @@ internal static class HostExceptions
     /// <summary><c>statistics.StatisticsError</c>, a <c>ValueError</c>.</summary>
     public static PyExceptionType StatisticsError { get; } =
         PyExceptionType.DefineHostException("StatisticsError", PyExceptionType.ValueError);
+
+    /// <summary><c>calendar.IllegalMonthError</c>, a <c>ValueError</c> and an <c>IndexError</c>.</summary>
+    public static PyExceptionType IllegalMonthError { get; } =
+        PyExceptionType.DefineHostException("IllegalMonthError", PyExceptionType.ValueError, PyExceptionType.IndexError);
+
+    /// <summary><c>calendar.IllegalWeekdayError</c>, a <c>ValueError</c>.</summary>
+    public static PyExceptionType IllegalWeekdayError { get; } =
+        PyExceptionType.DefineHostException("IllegalWeekdayError", PyExceptionType.ValueError);
 }

@@ -62,3 +62,29 @@ public sealed class PyModuleObject : PyObject
     public PyModuleObject Add(string name, Func<PyObject[], PyDict?, PyObject> implementation) =>
         Add(name, new PyBuiltinFunction($"{Name}.{name}", implementation));
 }
+
+/// <summary>
+/// A package whose submodules are modules in their own right — <c>urllib</c>, holding
+/// <c>urllib.parse</c>.
+/// </summary>
+/// <remarks>
+/// A submodule is an attribute of its package once it has been imported, as in CPython:
+/// <c>import urllib.parse</c> resolves the submodule, and this package then answers
+/// <c>urllib.parse</c> from the machine's module table. A submodule written in Python is
+/// built on first import, so the package cannot hold it from the start.
+/// </remarks>
+public sealed class PyPackageObject(string name, VirtualMachine machine) : PyObject
+{
+    /// <summary>The package's name.</summary>
+    public string Name { get; } = name;
+
+    /// <inheritdoc />
+    public override string TypeName => "module";
+
+    /// <inheritdoc />
+    public override string Repr() => $"<module '{Name}'>";
+
+    /// <inheritdoc />
+    public override PyObject? GetAttribute(string name) =>
+        name == "__name__" ? new PyStr(Name) : machine.Modules.GetValueOrDefault($"{Name}.{name}");
+}

@@ -497,6 +497,8 @@ public static class BuiltinNamespace
                     : digits > 330 ? value
                     : new PyFloat(RoundFloat(value.Value, digits)),
                 PyInt integer => PyInt.From(RoundToMultiple(integer.Value, BigInteger.Pow(10, -digits))),
+                // A module's number type (Decimal, Fraction) rounds itself, as `__round__` does.
+                IPyNumber hosted => hosted.Round(given is null or PyNone ? null : given),
                 var other => throw new PyRaise(PyErrors.TypeError(
                     $"type {other.TypeName} doesn't define __round__ method")),
             };
@@ -506,7 +508,7 @@ public static class BuiltinNamespace
         {
             // The pair is `//` and `%`, but a bad operand names `divmod()` rather than the
             // operator it happened to try first.
-            if (arguments[0] is not (PyInt or PyFloat) || arguments[1] is not (PyInt or PyFloat))
+            if (arguments[0] is not (PyInt or PyFloat or IPyNumber) || arguments[1] is not (PyInt or PyFloat or IPyNumber))
             {
                 throw new PyRaise(PyErrors.TypeError(
                     "unsupported operand type(s) for divmod(): "
@@ -1182,6 +1184,9 @@ public static class Conversions
 
             case IPyOperand operand when given is null && operand.Convert("int", null) is { } converted:
                 return converted;
+            // A module's number type (Decimal, Fraction) truncates itself.
+            case IPyNumber number:
+                return PyInt.From(number.Truncate());
 
             default:
                 throw new PyRaise(PyErrors.TypeError(
@@ -1359,6 +1364,9 @@ public static class Conversions
             // A host value with conversions of its own (a one-element ndarray).
             case IPyOperand operand when operand.Convert("float", null) is { } converted:
                 return converted;
+            // A module's number type (Decimal, Fraction) converts itself.
+            case IPyNumber number:
+                return new PyFloat(number.ToDouble());
 
             default:
                 throw new PyRaise(PyErrors.TypeError(
