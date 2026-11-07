@@ -606,7 +606,15 @@ public sealed class VirtualMachine
         _ => throw new PyRaise(PyErrors.TypeError($"'{value.TypeName}' object can't be awaited")),
     };
 
-    private PyObject CallFunction(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    private PyObject CallFunction(PyFunction function, PyObject[] arguments, PyDict? keywords) =>
+        CallFunction(function, arguments.AsSpan(), keywords);
+
+    /// <summary>
+    /// Calls a Python function. The arguments are a span because a call from bytecode
+    /// passes them straight off the caller's value stack, with no array in between: binding
+    /// copies them into the callee's locals before anything else can run.
+    /// </summary>
+    private PyObject CallFunction(PyFunction function, ReadOnlySpan<PyObject> arguments, PyDict? keywords)
     {
         if (++_depth > RecursionLimit)
         {
@@ -617,23 +625,32 @@ public sealed class VirtualMachine
 
         try
         {
-            var locals = BindArguments(function, arguments, keywords);
-            var cells = BuildCells(function, locals);
-            var frame = new Frame(function.Code, function.Globals, locals, cells);
+            var code = function.Code;
 
-            if (function.Code.IsGenerator)
+            // A generator's or a coroutine's frame outlives the call, so it is a frame of
+            // its own; every other frame ends with the call and is pooled.
+            if (code.IsGenerator || code.IsCoroutine)
             {
-                // A generator call runs nothing yet; it materializes lazily on iteration.
-                return new PyGenerator(this, frame);
+                var locals = BindArguments(function, arguments, keywords, rent: false);
+                var frame = new Frame(code, function.Globals, locals, BuildCells(function, locals));
+
+                return code.IsGenerator
+                    ? new PyGenerator(this, frame)
+                    : Coroutine(function.Name, frame);
             }
 
-            // Calling an `async def` produces a coroutine; the body runs when it is awaited.
-            if (function.Code.IsCoroutine)
-            {
-                return Coroutine(function.Name, frame);
-            }
+            var pooledLocals = BindArguments(function, arguments, keywords, rent: true);
+            var rented = _rentedLocals;
+            var pooled = RentFrame(code, function.Globals, pooledLocals, rented, BuildCells(function, pooledLocals));
 
-            return Execute(frame);
+            try
+            {
+                return Execute(pooled);
+            }
+            finally
+            {
+                ReturnFrame(pooled);
+            }
         }
         finally
         {
@@ -641,10 +658,39 @@ public sealed class VirtualMachine
         }
     }
 
+    /// <summary>Finished frames kept for the next call, so a call allocates no frame, stack or block list.</summary>
+    private readonly Stack<Frame> _framePool = new();
+
+    /// <summary>How many idle frames are kept: enough for a deep recursion's return trip, bounded so a one-off spike is not held forever.</summary>
+    private const int FramePoolLimit = 256;
+
+    private Frame RentFrame(CodeObject code, PyDict globals, PyObject?[] locals, bool rented, Dictionary<string, PyCell>? cells)
+    {
+        if (_framePool.TryPop(out var frame))
+        {
+            frame.Reuse(code, globals, locals, rented, cells);
+            return frame;
+        }
+
+        frame = new Frame(code, globals, [], null);
+        frame.Reuse(code, globals, locals, rented, cells);
+        return frame;
+    }
+
+    private void ReturnFrame(Frame frame)
+    {
+        frame.Release();
+
+        if (_framePool.Count < FramePoolLimit)
+        {
+            _framePool.Push(frame);
+        }
+    }
+
     /// <summary>
     /// A coroutine over a frame. Its own method because the lambda captures the frame, and a
     /// captured local makes the compiler allocate the closure on entry to the method that
-    /// declares it — which in <see cref="CallFunction"/> would be every call.
+    /// declares it — which in the function-calling path would be every call.
     /// </summary>
     private PyCoroutine Coroutine(string name, Frame frame) => new(name, () => Execute(frame));
 
@@ -734,10 +780,14 @@ public sealed class VirtualMachine
     };
 
     /// <summary>Binds call arguments to parameter slots, applying defaults and packing varargs.</summary>
-    private PyObject?[] BindArguments(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    /// <summary>Set by <see cref="BindArguments"/> when the locals it returned were rented.</summary>
+    private bool _rentedLocals;
+
+    private PyObject?[] BindArguments(PyFunction function, ReadOnlySpan<PyObject> arguments, PyDict? keywords, bool rent)
     {
         var code = function.Code;
         var parameters = code.Parameters;
+        _rentedLocals = false;
 
         // The ordinary calls: positional arguments only, a receiver perhaps, trailing
         // parameters perhaps filled from their defaults — a plain function, a method, a
@@ -769,7 +819,20 @@ public sealed class VirtualMachine
 
                 if (complete)
                 {
-                    var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
+                    var size = Math.Max(code.LocalNames.Count, 1);
+                    PyObject?[] locals;
+
+                    // Rented locals come back cleared (see Frame.Release), so every slot
+                    // the call does not fill starts unbound, as a fresh array would.
+                    if (rent)
+                    {
+                        locals = System.Buffers.ArrayPool<PyObject?>.Shared.Rent(size);
+                        _rentedLocals = true;
+                    }
+                    else
+                    {
+                        locals = new PyObject?[size];
+                    }
 
                     if (self is not null)
                     {
@@ -791,7 +854,7 @@ public sealed class VirtualMachine
             }
         }
 
-        return BindArgumentsGenerally(function, arguments, keywords);
+        return BindArgumentsGenerally(function, arguments.ToArray(), keywords);
     }
 
     /// <summary>
@@ -960,11 +1023,51 @@ public sealed class VirtualMachine
             _cells = cells;
         }
 
-        public CodeObject Code { get; }
+        public CodeObject Code { get; private set; }
 
-        public PyDict Globals { get; }
+        public PyDict Globals { get; private set; }
 
-        public PyObject?[] Locals { get; }
+        /// <summary>
+        /// The local slots — at least <c>Code.LocalNames.Count</c> of them, and more when
+        /// the array was rented from the pool.
+        /// </summary>
+        public PyObject?[] Locals { get; private set; }
+
+        /// <summary>Whether <see cref="Locals"/> came from <see cref="System.Buffers.ArrayPool{T}"/>.</summary>
+        private bool _localsRented;
+
+        /// <summary>Readies a pooled frame for another call.</summary>
+        public void Reuse(CodeObject code, PyDict globals, PyObject?[] locals, bool localsRented, Dictionary<string, PyCell>? cells)
+        {
+            Code = code;
+            Globals = globals;
+            Locals = locals;
+            _localsRented = localsRented;
+            _cells = cells;
+        }
+
+        /// <summary>
+        /// Clears a finished frame for the pool: its stack and block lists keep their
+        /// capacity, its locals go back to the array pool, and it holds on to nothing the
+        /// call produced.
+        /// </summary>
+        public void Release()
+        {
+            Stack.Clear();
+            Blocks.Clear();
+            _cells = null;
+            CurrentException = null;
+            InstructionPointer = 0;
+            CurrentLine = 0;
+
+            if (_localsRented)
+            {
+                System.Buffers.ArrayPool<PyObject?>.Shared.Return(Locals, clearArray: true);
+                _localsRented = false;
+            }
+
+            Locals = [];
+        }
 
         /// <summary>
         /// The closure cells, made real on first need.
@@ -1844,7 +1947,21 @@ public sealed class VirtualMachine
 
             case OpCode.Call:
             {
-                var arguments = PopMany(frame, instruction.Operand).ToArray();
+                var count = instruction.Operand;
+                var stack = frame.Stack;
+                var start = stack.Count - count;
+
+                // A Python function reads its arguments straight off this stack: the callee
+                // runs on a frame of its own and copies them into its locals first.
+                if (stack[start - 1] is PyFunction function)
+                {
+                    var returned = CallFunction(function, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count), null);
+                    stack.RemoveRange(start - 1, count + 1);
+                    frame.Push(returned);
+                    return false;
+                }
+
+                var arguments = PopArray(frame, count);
                 var callable = frame.Pop();
                 frame.Push(Call(callable, arguments));
                 return false;
@@ -2580,6 +2697,20 @@ public sealed class VirtualMachine
             ?? throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
         _ => throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
     };
+
+    /// <summary>Pops <paramref name="count"/> values into an array of exactly that size.</summary>
+    private static PyObject[] PopArray(Frame frame, int count)
+    {
+        if (count <= 0)
+        {
+            return [];
+        }
+
+        var start = frame.Stack.Count - count;
+        var values = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(frame.Stack).Slice(start, count).ToArray();
+        frame.Stack.RemoveRange(start, count);
+        return values;
+    }
 
     private static List<PyObject> PopMany(Frame frame, int count)
     {
