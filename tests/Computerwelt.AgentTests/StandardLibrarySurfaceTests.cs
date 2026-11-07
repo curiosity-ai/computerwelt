@@ -20,7 +20,7 @@ namespace Computerwelt.AgentTests;
 /// </para>
 /// <para>
 /// Several entries in <see cref="Available"/> are extensions rather than ports —
-/// <c>glob</c>, <c>fnmatch</c> and <c>io</c> do not exist upstream at all. What each one
+/// <c>glob</c>, <c>fnmatch</c>, <c>io</c> and <c>pandas</c> do not exist upstream at all. What each one
 /// promises is pinned by a fixture in <c>tests/monty-extensions/</c>.
 /// </para>
 /// </remarks>
@@ -56,6 +56,7 @@ public sealed class StandardLibrarySurfaceTests
         "operator",
         "os",
         "os.path",
+        "pandas",
         "pathlib",
         "posixpath",
         "random",

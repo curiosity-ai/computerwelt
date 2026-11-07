@@ -48,6 +48,10 @@ public static class StandardLibrary
         // is a perfectly ordinary use of it.
         modules["fnmatch"] = FnmatchModule.Create();
 
+        // pandas reads and writes through the same filesystem as `open`, and without one
+        // still works in memory (and over `io.StringIO`), so it is present either way.
+        modules["pandas"] = Pandas.PdModule.Create(machine, fileSystem);
+
         if (fileSystem is not null)
         {
             var os = OsModule.Create(fileSystem, machine);

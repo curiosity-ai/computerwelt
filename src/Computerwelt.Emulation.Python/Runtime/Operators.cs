@@ -76,6 +76,18 @@ public static class Operators
             return answer;
         }
 
+        // A host type that defines its own operators (pandas' Series and DataFrame) answers
+        // before any rule below, so `s + 1` and `1 + s` are both the Series' business.
+        if (left is IPyOperatorOverloads leftOverloads && leftOverloads.BinaryOperator(op, right, reflected: false) is { } overloaded)
+        {
+            return overloaded;
+        }
+
+        if (right is IPyOperatorOverloads rightOverloads && rightOverloads.BinaryOperator(op, left, reflected: true) is { } reflectedResult)
+        {
+            return reflectedResult;
+        }
+
         if (left is PyDeque deque)
         {
             if (op == "+")
@@ -155,7 +167,9 @@ public static class Operators
 
     /// <summary>Applies a unary operator.</summary>
     public static PyObject Unary(string op, PyObject operand) =>
-        Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
+        (operand is IPyOperatorOverloads overloads && op != "not" ? overloads.UnaryOperator(op) : null)
+        ?? Modules.DatetimeModule.TryUnary(op, operand)
+        ?? Apply(op, operand);
 
     private static PyObject Apply(string op, PyObject operand) => op switch
     {
@@ -197,7 +211,8 @@ public static class Operators
     };
 
     /// <summary>Applies a comparison.</summary>
-    public static PyObject Compare(string op, PyObject left, PyObject right) => op switch
+    public static PyObject Compare(string op, PyObject left, PyObject right) =>
+        (left is IPyOperatorOverloads || right is IPyOperatorOverloads ? OverloadedComparison(op, left, right) : null) ?? op switch
     {
         "==" => Equality(left, right, negate: false),
         "!=" => Equality(left, right, negate: true),
@@ -213,6 +228,27 @@ public static class Operators
         "<" or "<=" or ">" or ">=" => Ordering(op, left, right),
         _ => throw new PyRaise(PyErrors.TypeError($"unsupported comparison {op}")),
     };
+
+    /// <summary>
+    /// Asks a host type that defines its own comparisons (see <see cref="IPyOperatorOverloads"/>),
+    /// mirroring the operator when that type is on the right: <c>1 &lt; s</c> is <c>s &gt; 1</c>.
+    /// </summary>
+    private static PyObject? OverloadedComparison(string op, PyObject left, PyObject right)
+    {
+        if (op is not ("==" or "!=" or "<" or "<=" or ">" or ">="))
+        {
+            return null;
+        }
+
+        if (left is IPyOperatorOverloads leftOverloads && leftOverloads.CompareOperator(op, right) is { } answer)
+        {
+            return answer;
+        }
+
+        var mirrored = op switch { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", _ => op };
+
+        return right is IPyOperatorOverloads rightOverloads ? rightOverloads.CompareOperator(mirrored, left) : null;
+    }
 
     /// <summary>
     /// Applies <c>==</c> or <c>!=</c>.
