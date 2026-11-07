@@ -169,3 +169,22 @@ cube = a.reshape(10, 5, 20)
 all_close(cube.sum(axis=(1, 2)), [math.fsum(xs[i * 100:(i + 1) * 100]) for i in range(10)], rel=1e-12)
 assert cube.sum(axis=2, keepdims=True).shape == (10, 5, 1)
 assert close(float(np.linalg.norm(k)), math.sqrt(sum(i * i for i in range(N))), rel=1e-12)
+
+# Broadcast and strided operands: a row or a column over a matrix, a transpose, a stepped
+# slice. A transpose's result keeps the transposed layout, as numpy's does, and must still
+# reshape, chain and print as the values it holds.
+mu = m.mean(axis=0).tolist()
+assert (m - m.mean(axis=0)).tolist() == [[row[c] - mu[c] for c in range(20)] for row in rows]
+assert (m / m.max(axis=1, keepdims=True)).tolist() == [[v / max(row) for v in row] for row in rows]
+cm = m[:, :1]
+assert (m - cm).tolist() == [[v - row[0] for v in row] for row in rows]
+assert (m.T * 2.0).tolist() == [[row[c] * 2.0 for row in rows] for c in range(20)]
+tt = m.T + m.T
+assert tt.tolist() == [[row[c] + row[c] for row in rows] for c in range(20)]
+assert tt.reshape(-1).tolist() == [row[c] * 2.0 for c in range(20) for row in rows]
+assert (tt.T == m * 2.0).all() and np.sqrt(np.abs(m.T)).T.tolist() == [[math.sqrt(abs(v)) for v in row] for row in rows]
+assert (m[::2] + 1.0).tolist() == [[v + 1.0 for v in row] for row in rows[::2]]
+assert (m[:, ::3] > 0.0).tolist() == [[v > 0.0 for v in row[::3]] for row in rows]
+kk = k.reshape(50, 20)
+assert (kk.T - kk.T[:, :1]).tolist() == [[i * 20 + c - c for i in range(50)] for c in range(20)]
+assert (kk - np.arange(20)).tolist() == [[i * 20 for _ in range(20)] for i in range(50)]

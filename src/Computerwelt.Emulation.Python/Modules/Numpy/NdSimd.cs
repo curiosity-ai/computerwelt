@@ -101,14 +101,162 @@ internal static partial class NdSimd
 
     // ---- binary ----
 
-    /// <summary>A binary ufunc over contiguous float, int or bool operands, or null.</summary>
-    public static NdArray? TryBinary(string name, NdArray x, NdArray y, int[] shape, int n)
+    /// <summary>
+    /// The strides of a view that is not row-major but still covers a dense block of its
+    /// buffer — every element once, no gaps — in some order of its axes (a transpose, a
+    /// Fortran-ordered array); null otherwise. Strides here count elements.
+    /// </summary>
+    private static int[]? DenseLayout(NdArray array)
     {
-        if (n < Threshold || (x.Size == 1 && y.Size == 1) || !Usable(x, shape) || !Usable(y, shape))
+        var order = Enumerable.Range(0, array.NDim).Where(d => array.Shape[d] != 1).OrderBy(d => array.Strides[d]).ToArray();
+        var expected = 1;
+
+        foreach (var d in order)
+        {
+            if (array.Strides[d] != expected)
+            {
+                return null;
+            }
+
+            expected *= array.Shape[d];
+        }
+
+        return (int[])array.Strides.Clone();
+    }
+
+    /// <summary>The common dense layout of two operands of the result's shape (or one beside a scalar), when it is not row-major; else null.</summary>
+    private static int[]? SharedLayout(NdArray x, NdArray y, int[] shape)
+    {
+        var full = x.Size == 1 ? y : x;
+
+        if (full.IsContiguous || !full.Shape.AsSpan().SequenceEqual(shape) || DenseLayout(full) is not { } strides)
         {
             return null;
         }
 
+        var other = ReferenceEquals(full, x) ? y : x;
+        var matches = other.Size == 1 || (other.Shape.AsSpan().SequenceEqual(shape) && other.Strides.AsSpan().SequenceEqual(strides));
+        return matches ? strides : null;
+    }
+
+    /// <summary>A dense operand's memory as a one-dimensional contiguous view; a scalar stays as it is.</summary>
+    private static NdArray Flat(NdArray array) => array.Size == 1 ? array : array.View([array.Size], [1], array.Offset);
+
+    /// <summary>
+    /// A strided or broadcast operand gathered into a new contiguous array of
+    /// <paramref name="shape"/>, so the vector loops can take it: a transpose, a slice with a
+    /// step, a row vector spread over a matrix (<c>x - x.mean(axis=0)</c>).
+    /// </summary>
+    /// <remarks>
+    /// One gather of n elements, then a vector loop, instead of the general loop's
+    /// per-element dtype and operator dispatch. The copy is no larger than the result the
+    /// operation allocates anyway, and the shape has already passed the size cap.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static NdArray Dense(NdArray array, int[] shape)
+    {
+        var view = array.BroadcastTo(shape);
+        var target = (int[])shape.Clone();
+
+        switch (view.Kind)
+        {
+            case DKind.Float:
+            {
+                var result = GC.AllocateUninitializedArray<double>(view.Size);
+                Gather(view, view.Buffer.F!, result);
+                return NdArray.FromDoubles(result, target);
+            }
+
+            case DKind.Int:
+            {
+                var result = GC.AllocateUninitializedArray<long>(view.Size);
+                Gather(view, view.Buffer.I!, result);
+                return NdArray.FromLongs(result, target);
+            }
+
+            default:
+            {
+                var result = new bool[view.Size];
+                Gather(view, view.Buffer.B!, result);
+                return NdArray.FromBools(result, target);
+            }
+        }
+    }
+
+    /// <summary>A view's elements in row-major order: an odometer over the outer axes, a strided run along the last.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Gather<T>(NdArray view, T[] source, Span<T> destination)
+    {
+        var dims = view.NDim;
+        var length = view.Shape[dims - 1];
+        var stride = view.Strides[dims - 1];
+        Span<int> index = stackalloc int[dims];
+        var start = view.Offset;
+        var written = 0;
+
+        while (written < destination.Length)
+        {
+            var run = destination.Slice(written, length);
+
+            if (stride == 1)
+            {
+                source.AsSpan(start, length).CopyTo(run);
+            }
+            else if (stride == 0)
+            {
+                run.Fill(source[start]);
+            }
+            else
+            {
+                for (int i = 0, at = start; i < run.Length; i++, at += stride)
+                {
+                    run[i] = source[at];
+                }
+            }
+
+            written += length;
+
+            // Advance the outer axes, carrying like an odometer.
+            for (var d = dims - 2; d >= 0; d--)
+            {
+                start += view.Strides[d];
+
+                if (++index[d] < view.Shape[d])
+                {
+                    break;
+                }
+
+                start -= view.Strides[d] * view.Shape[d];
+                index[d] = 0;
+            }
+        }
+    }
+
+    /// <summary>A binary ufunc over contiguous float, int or bool operands, or null.</summary>
+    public static NdArray? TryBinary(string name, NdArray x, NdArray y, int[] shape, int n)
+    {
+        if (n < Threshold || (x.Size == 1 && y.Size == 1)
+            || x.Kind is not (DKind.Float or DKind.Int or DKind.Bool) || y.Kind is not (DKind.Float or DKind.Int or DKind.Bool))
+        {
+            return null;
+        }
+
+        if (Rows(name, x, y, shape, n) is { } byRow)
+        {
+            return byRow;
+        }
+
+        if (SharedLayout(x, y, shape) is { } strides)
+        {
+            // Both operands (or one, beside a scalar) cover their buffers densely in the same
+            // axis order — a transpose, typically. Run over the memory as one flat span and
+            // hand the result back in that same layout, as numpy's default order does.
+            var flat = TryBinary(name, Flat(x), Flat(y), [n], n);
+            return flat?.View((int[])shape.Clone(), strides, 0);
+        }
+
+        x = Usable(x, shape) ? x : Dense(x, shape);
+        y = Usable(y, shape) ? y : Dense(y, shape);
         var xk = x.Kind;
         var yk = y.Kind;
 
@@ -138,11 +286,80 @@ internal static partial class NdSimd
         return FloatBinary(name, x, y, shape, n);
     }
 
+    private static bool IsFloatBinary(string name) => name is "add" or "subtract" or "multiply" or "true_divide" or "divide"
+        or "maximum" or "minimum" or "fmax" or "fmin" or "power" or "float_power" or "arctan2" or "hypot" or "copysign"
+        or "floor_divide" or "remainder" or "mod" or "fmod";
+
+    /// <summary>
+    /// A float operation between a full contiguous array and a row (<c>x - x.mean(axis=0)</c>)
+    /// or a column (<c>x - c[:, None]</c>) broadcast over it, row by row with no copy of the
+    /// broadcast operand; null for any other shape.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static NdArray? Rows(string name, NdArray x, NdArray y, int[] shape, int n)
+    {
+        if (shape.Length < 2 || x.Kind != DKind.Float || y.Kind != DKind.Float || !IsFloatBinary(name))
+        {
+            return null;
+        }
+
+        var xFull = Covers(x, shape);
+        var other = xFull ? y : x;
+
+        if ((!xFull && !Covers(y, shape)) || other.Size == 1)
+        {
+            return null;
+        }
+
+        var width = shape[^1];
+        var rows = n / width;
+        var full = Doubles(xFull ? x : y);
+        var result = GC.AllocateUninitializedArray<double>(n);
+
+        if (IsRow(other, shape))
+        {
+            var row = Doubles(other);
+
+            for (var r = 0; r < rows; r++)
+            {
+                var range = new Range(r * width, (r + 1) * width);
+                var a = new Operand<double>(full[range]);
+                var b = new Operand<double>(row);
+                Apply(name, xFull ? a : b, xFull ? b : a, result.AsSpan(range));
+            }
+
+            return NdArray.FromDoubles(result, (int[])shape.Clone());
+        }
+
+        if (IsColumn(other, shape))
+        {
+            var column = other.IsContiguous ? Doubles(other) : Dense(other, other.Shape).Buffer.F;
+
+            for (var r = 0; r < rows; r++)
+            {
+                var range = new Range(r * width, (r + 1) * width);
+                var a = new Operand<double>(full[range]);
+                var b = new Operand<double>(column[r]);
+                Apply(name, xFull ? a : b, xFull ? b : a, result.AsSpan(range));
+            }
+
+            return NdArray.FromDoubles(result, (int[])shape.Clone());
+        }
+
+        return null;
+    }
+
+    /// <summary>A contiguous operand whose shape, leading ones aside, is the last axis of <paramref name="shape"/>.</summary>
+    private static bool IsRow(NdArray array, int[] shape) =>
+        array.IsContiguous && array.Size == shape[^1] && array.Shape.Length > 0 && array.Shape[^1] == shape[^1];
+
+    /// <summary>An operand of <paramref name="shape"/> with the last axis 1: one value per row.</summary>
+    private static bool IsColumn(NdArray array, int[] shape) =>
+        array.NDim == shape.Length && array.Shape[^1] == 1 && array.Shape.AsSpan(0, shape.Length - 1).SequenceEqual(shape.AsSpan(0, shape.Length - 1));
+
     private static NdArray? FloatBinary(string name, NdArray x, NdArray y, int[] shape, int n)
     {
-        if (name is not ("add" or "subtract" or "multiply" or "true_divide" or "divide" or "maximum" or "minimum"
-            or "fmax" or "fmin" or "power" or "float_power" or "arctan2" or "hypot" or "copysign"
-            or "floor_divide" or "remainder" or "mod" or "fmod"))
+        if (!IsFloatBinary(name))
         {
             return null;
         }
@@ -593,7 +810,7 @@ internal static partial class NdSimd
     /// <summary>A float-valued unary ufunc over a contiguous float or int array, or null.</summary>
     public static NdArray? TryUnary(string name, NdArray x)
     {
-        if (x.Size < Threshold || !x.IsContiguous || x.Kind is not (DKind.Float or DKind.Int))
+        if (x.Size < Threshold || x.Kind is not (DKind.Float or DKind.Int))
         {
             return null;
         }
@@ -611,6 +828,13 @@ internal static partial class NdSimd
             return null;
         }
 
+        if (!x.IsContiguous && DenseLayout(x) is { } strides)
+        {
+            var flat = TryUnary(name, Flat(x));
+            return flat?.View((int[])x.Shape.Clone(), strides, 0);
+        }
+
+        x = x.IsContiguous ? x : Dense(x, x.Shape);
         double[]? scratch = null;
 
         try
