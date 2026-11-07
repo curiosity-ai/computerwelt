@@ -297,7 +297,10 @@ public sealed class PythonRunner
         {
             var library = libraries.TryGetValue(name, out var host) ? host : Computerwelt.Emulation.Python.Modules.BuiltInSources.Find(name);
 
-            return library?.Create(new PythonHostContext(name, machine, FileSystem, timeProvider));
+            // Standard modules too large to build for every run (`numpy`) come last, built on
+            // first import like a library.
+            return library?.Create(new PythonHostContext(name, machine, FileSystem, timeProvider))
+                ?? Computerwelt.Emulation.Python.Modules.StandardLibrary.CreateOnDemand(machine, name);
         };
     }
 

@@ -97,6 +97,18 @@ public static class Operators
             return answer;
         }
 
+        // A host type with operators of its own (numpy's ndarray) answers before any of the
+        // built-in rules, on either side — see IPyOperand.
+        if (left is IPyOperand forwardOperand && forwardOperand.Binary(op, right, reflected: false) is { } forwardResult)
+        {
+            return forwardResult;
+        }
+
+        if (right is IPyOperand reflectedOperand && reflectedOperand.Binary(op, left, reflected: true) is { } reflectedResult)
+        {
+            return reflectedResult;
+        }
+
         if (left is PyDeque deque)
         {
             if (op == "+")
@@ -176,7 +188,8 @@ public static class Operators
 
     /// <summary>Applies a unary operator.</summary>
     public static PyObject Unary(string op, PyObject operand) =>
-        PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
+        (op != "not" && operand is IPyOperand own ? own.Unary(op) : null)
+        ?? PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
 
     private static PyObject Apply(string op, PyObject operand) => op switch
     {
@@ -218,7 +231,8 @@ public static class Operators
     };
 
     /// <summary>Applies a comparison.</summary>
-    public static PyObject Compare(string op, PyObject left, PyObject right) => op switch
+    public static PyObject Compare(string op, PyObject left, PyObject right) =>
+        CompareOperand(op, left, right) ?? op switch
     {
         "==" => Equality(left, right, negate: false),
         "!=" => Equality(left, right, negate: true),
@@ -249,6 +263,26 @@ public static class Operators
             ">=" => Subset(right, left),
             _ => right.Count < left.Count && Subset(right, left),
         };
+    }
+
+    /// <summary>
+    /// A rich comparison answered by an <see cref="IPyOperand"/> on either side, with the
+    /// operator mirrored when the operand is on the right — or null when neither answers.
+    /// </summary>
+    private static PyObject? CompareOperand(string op, PyObject left, PyObject right)
+    {
+        if (op is not ("==" or "!=" or "<" or "<=" or ">" or ">="))
+        {
+            return null;
+        }
+
+        if (left is IPyOperand forward && forward.Compare(op, right) is { } answer)
+        {
+            return answer;
+        }
+
+        var mirrored = op switch { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", _ => op };
+        return right is IPyOperand reflected ? reflected.Compare(mirrored, left) : null;
     }
 
     /// <summary>
@@ -757,6 +791,11 @@ public static class Operators
     /// </remarks>
     private static PyObject? InPlace(string op, PyObject left, PyObject right)
     {
+        if (left is IPyOperand operand && operand.InPlace(op, right) is { } updated)
+        {
+            return updated;
+        }
+
         if (left is PyInstance instance
             && InPlaceDunders.TryGetValue(op, out var dunder)
             && instance.Dunder(dunder) is { } method)
