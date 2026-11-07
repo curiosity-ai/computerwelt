@@ -176,6 +176,19 @@ public sealed class Compiler
                 CollectBindings(loop.OrElse);
                 break;
 
+            case MatchStatement match:
+                foreach (var matchCase in match.Cases)
+                {
+                    foreach (var name in PatternNames(matchCase.Pattern))
+                    {
+                        Declare(name);
+                    }
+
+                    CollectBindings(matchCase.Body);
+                }
+
+                break;
+
             case If branch:
                 CollectBindings(branch.Body);
                 CollectBindings(branch.OrElse);
@@ -479,6 +492,10 @@ public sealed class Compiler
                 CompileIf(branch);
                 break;
 
+            case MatchStatement match:
+                CompileMatch(match);
+                break;
+
             case While loop:
                 CompileWhile(loop);
                 break;
@@ -640,6 +657,17 @@ public sealed class Compiler
                 }
 
                 _bindingImport = false;
+                break;
+
+            case ImportFrom { Names: [{ Name: "*" }] } starImport:
+                if (_isFunctionScope)
+                {
+                    throw new PythonSyntaxError(
+                        "import * only allowed at module level", starImport.Line, starImport.Column);
+                }
+
+                Emit(OpCode.ImportName, _code.AddName(starImport.Module), starImport.Line);
+                Emit(OpCode.ImportStar, 0, starImport.Line);
                 break;
 
             case ImportFrom importFrom:
@@ -848,6 +876,246 @@ public sealed class Compiler
                 throw new PythonSyntaxError("cannot delete expression", target.Line, target.Column);
         }
     }
+
+    /// <summary>
+    /// The failure exits of a pattern: jumps that must first pop however many values the
+    /// pattern had pushed when it gave up.
+    /// </summary>
+    private sealed class PatternFailures
+    {
+        public List<(int Jump, int Depth)> Sites { get; } = [];
+    }
+
+    /// <summary>
+    /// Compiles <c>match</c>. The subject stays on the stack for the whole statement; each
+    /// case tests a copy, and a pattern that fails part-way jumps into a ladder of pops that
+    /// discards exactly what it had pushed before trying the next case.
+    /// </summary>
+    private void CompileMatch(MatchStatement match)
+    {
+        CompileExpression(match.Subject);
+        var done = new List<int>();
+
+        foreach (var matchCase in match.Cases)
+        {
+            var failures = new PatternFailures();
+
+            Emit(OpCode.Duplicate, 0, matchCase.Line);
+            CompilePattern(matchCase.Pattern, failures, 1);
+
+            if (matchCase.Guard is { } guard)
+            {
+                CompileExpression(guard);
+                failures.Sites.Add((Emit(OpCode.JumpIfFalse, 0, matchCase.Line), 0));
+            }
+
+            Emit(OpCode.Pop, 0, matchCase.Line);
+            CompileStatements(matchCase.Body);
+            done.Add(Emit(OpCode.Jump, 0, matchCase.Line));
+
+            EmitFailureLadder(failures, matchCase.Line);
+        }
+
+        Emit(OpCode.Pop, 0, match.Line);
+        PatchAll(done, Here);
+    }
+
+    private void EmitFailureLadder(PatternFailures failures, int line)
+    {
+        var deepest = failures.Sites.Count == 0 ? 0 : failures.Sites.Max(static s => s.Depth);
+        var targets = new int[deepest + 1];
+
+        for (var depth = deepest; depth >= 1; depth--)
+        {
+            targets[depth] = Here;
+            Emit(OpCode.Pop, 0, line);
+        }
+
+        targets[0] = Here;
+
+        foreach (var (jump, depth) in failures.Sites)
+        {
+            Patch(jump, targets[depth]);
+        }
+    }
+
+    /// <summary>
+    /// Compiles a pattern that tests (and consumes) the value on top of the stack.
+    /// </summary>
+    /// <param name="pattern">The pattern.</param>
+    /// <param name="failures">Where a failure jumps, with how much to pop.</param>
+    /// <param name="depth">Values on the stack that belong to the case, the tested one included.</param>
+    private void CompilePattern(Pattern pattern, PatternFailures failures, int depth)
+    {
+        var line = pattern.Line;
+
+        switch (pattern)
+        {
+            case MatchCapture { Name: null } or MatchStar { Name: null }:
+                Emit(OpCode.Pop, 0, line);
+                break;
+
+            case MatchCapture { Name: { } name }:
+                EmitStore(name, line);
+                break;
+
+            case MatchStar { Name: { } starName }:
+                EmitStore(starName, line);
+                break;
+
+            case MatchValue value:
+                CompileExpression(value.Value);
+                Emit(OpCode.CompareOp, _code.AddName("=="), line);
+                failures.Sites.Add((Emit(OpCode.JumpIfFalse, 0, line), depth - 1));
+                break;
+
+            case MatchSingleton singleton:
+                Emit(OpCode.LoadConst, _code.AddConstant(Literals.ToPyObject(singleton.Value)), line);
+                Emit(OpCode.CompareOp, _code.AddName("is"), line);
+                failures.Sites.Add((Emit(OpCode.JumpIfFalse, 0, line), depth - 1));
+                break;
+
+            case MatchAs asPattern:
+                Emit(OpCode.Duplicate, 0, line);
+                CompilePattern(asPattern.Pattern, failures, depth + 1);
+                EmitStore(asPattern.Name, line);
+                break;
+
+            case MatchOr or:
+            {
+                var matched = new List<int>();
+
+                for (var i = 0; i < or.Alternatives.Count - 1; i++)
+                {
+                    var local = new PatternFailures();
+                    Emit(OpCode.Duplicate, 0, line);
+                    CompilePattern(or.Alternatives[i], local, 1);
+                    Emit(OpCode.Pop, 0, line);
+                    matched.Add(Emit(OpCode.Jump, 0, line));
+                    EmitFailureLadder(local, line);
+                }
+
+                CompilePattern(or.Alternatives[^1], failures, depth);
+                PatchAll(matched, Here);
+                break;
+            }
+
+            case MatchSequence sequence:
+            {
+                var count = sequence.Patterns.Count;
+                var star = -1;
+
+                for (var i = 0; i < count; i++)
+                {
+                    if (sequence.Patterns[i] is MatchStar)
+                    {
+                        if (star >= 0)
+                        {
+                            throw new PythonSyntaxError("multiple starred names in sequence pattern", line, pattern.Column);
+                        }
+
+                        star = i;
+                    }
+                }
+
+                Emit(OpCode.MatchSequenceCheck, (count << 1) | (star >= 0 ? 1 : 0), line);
+                failures.Sites.Add((Emit(OpCode.JumpIfFalse, 0, line), depth));
+
+                if (star >= 0)
+                {
+                    Emit(OpCode.UnpackStarred, (star << 16) | count, line);
+                }
+                else
+                {
+                    Emit(OpCode.UnpackSequence, count, line);
+                }
+
+                CompileSubpatterns(sequence.Patterns, failures, depth - 1 + count);
+                break;
+            }
+
+            case MatchMapping mapping:
+            {
+                Emit(OpCode.MatchMappingCheck, 0, line);
+                failures.Sites.Add((Emit(OpCode.JumpIfFalse, 0, line), depth));
+
+                if (mapping.Rest is { } rest)
+                {
+                    Emit(OpCode.Duplicate, 0, line);
+                    CompileSequence(mapping.Keys, OpCode.BuildTuple, OpCode.ListExtend, line);
+                    Emit(OpCode.DictWithoutKeys, 0, line);
+                    EmitStore(rest, line);
+                }
+
+                if (mapping.Keys.Count == 0)
+                {
+                    Emit(OpCode.Pop, 0, line);
+                    break;
+                }
+
+                CompileSequence(mapping.Keys, OpCode.BuildTuple, OpCode.ListExtend, line);
+                Emit(OpCode.MatchKeys, 0, line);
+                EmitNoneCheck(failures, depth, line);
+                Emit(OpCode.UnpackSequence, mapping.Keys.Count, line);
+                CompileSubpatterns(mapping.Patterns, failures, depth - 1 + mapping.Keys.Count);
+                break;
+            }
+
+            case MatchClass classPattern:
+            {
+                CompileExpression(classPattern.Class);
+                Emit(OpCode.LoadConst, _code.AddConstant(new PyTuple([.. classPattern.KeywordNames.Select(static n => (PyObject)new PyStr(n))])), line);
+                Emit(OpCode.MatchClass, classPattern.Positional.Count, line);
+                EmitNoneCheck(failures, depth, line);
+
+                var total = classPattern.Positional.Count + classPattern.KeywordPatterns.Count;
+
+                if (total == 0)
+                {
+                    Emit(OpCode.Pop, 0, line);
+                    break;
+                }
+
+                Emit(OpCode.UnpackSequence, total, line);
+                CompileSubpatterns([.. classPattern.Positional, .. classPattern.KeywordPatterns], failures, depth - 1 + total);
+                break;
+            }
+
+            default:
+                throw new PythonSyntaxError("unsupported pattern", line, pattern.Column);
+        }
+    }
+
+    /// <summary>Fails when the value on top of the stack is None, leaving it in place otherwise.</summary>
+    private void EmitNoneCheck(PatternFailures failures, int depth, int line)
+    {
+        Emit(OpCode.Duplicate, 0, line);
+        Emit(OpCode.LoadConst, _code.AddConstant(PyNone.Instance), line);
+        Emit(OpCode.CompareOp, _code.AddName("is"), line);
+        failures.Sites.Add((Emit(OpCode.JumpIfTrue, 0, line), depth));
+    }
+
+    private void CompileSubpatterns(IReadOnlyList<Pattern> patterns, PatternFailures failures, int depth)
+    {
+        foreach (var subpattern in patterns)
+        {
+            CompilePattern(subpattern, failures, depth);
+            depth--;
+        }
+    }
+
+    /// <summary>Every name a pattern binds.</summary>
+    private static IEnumerable<string> PatternNames(Pattern pattern) => pattern switch
+    {
+        MatchCapture { Name: { } name } => [name],
+        MatchStar { Name: { } name } => [name],
+        MatchAs asPattern => [.. PatternNames(asPattern.Pattern), asPattern.Name],
+        MatchOr or => or.Alternatives.SelectMany(PatternNames).Distinct(),
+        MatchSequence sequence => sequence.Patterns.SelectMany(PatternNames),
+        MatchMapping mapping => [.. mapping.Patterns.SelectMany(PatternNames), .. mapping.Rest is { } rest ? [rest] : Array.Empty<string>()],
+        MatchClass classPattern => classPattern.Positional.Concat(classPattern.KeywordPatterns).SelectMany(PatternNames),
+        _ => [],
+    };
 
     private void CompileIf(If branch)
     {
@@ -1364,6 +1632,8 @@ public sealed class Compiler
 
     private static bool ContainsYield(Statement statement) => statement switch
     {
+        MatchStatement match => ContainsYield(match.Subject)
+            || match.Cases.Any(c => (c.Guard is not null && ContainsYield(c.Guard)) || ContainsYield(c.Body)),
         ExpressionStatement expression => ContainsYield(expression.Value),
         Assign assign => assign.Value is not null && ContainsYield(assign.Value),
         AugmentedAssign augmented => ContainsYield(augmented.Value),
@@ -1991,6 +2261,7 @@ internal static class Literals
         long integer => PyInt.From(integer),
         BigInteger integer => PyInt.From(integer),
         double number => new PyFloat(number),
+        Complex imaginary => new PyComplex(imaginary.Real, imaginary.Imaginary),
         string text => new PyStr(text),
         byte[] bytes => new PyBytes(bytes),
         Parsing.Ellipsis => PyEllipsis.Instance,

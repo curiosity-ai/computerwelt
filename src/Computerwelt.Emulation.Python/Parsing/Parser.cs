@@ -130,7 +130,356 @@ public sealed class Parser
             return [ParseDecorated()];
         }
 
+        // `match` is a soft keyword: only a line shaped like a match statement is one, so
+        // `match = re.match(...)` still assigns a variable.
+        if (token is { Kind: TokenKind.Name, Text: "match" } && TryParseMatch() is { } match)
+        {
+            return [match];
+        }
+
         return ParseSimpleStatementLine();
+    }
+
+    private Statement? TryParseMatch()
+    {
+        var token = Current;
+        var save = _index;
+        Expression subject;
+
+        try
+        {
+            _index++;
+
+            if (Current.Is(":") || Current.Is("=") || Current.Is(".") || Current.Kind is TokenKind.Newline or TokenKind.EndOfInput
+                || (Current.Kind == TokenKind.Operator && Current.Text.EndsWith('=') && Current.Text != "=="))
+            {
+                _index = save;
+                return null;
+            }
+
+            subject = ParseExpressionList();
+
+            if (!Current.Is(":") || Peek().Kind != TokenKind.Newline)
+            {
+                _index = save;
+                return null;
+            }
+        }
+        catch (PythonSyntaxError)
+        {
+            _index = save;
+            return null;
+        }
+
+        Expect(":");
+        Expect(TokenKind.Newline);
+        Expect(TokenKind.Indent);
+
+        var cases = new List<MatchCase>();
+
+        while (!AtEnd && Current.Kind != TokenKind.Dedent)
+        {
+            if (Match(TokenKind.Newline))
+            {
+                continue;
+            }
+
+            var caseToken = Current;
+
+            if (!(Current.Kind == TokenKind.Name && Current.Text == "case"))
+            {
+                throw Error("expected 'case'");
+            }
+
+            _index++;
+            var pattern = ParseCasePattern();
+            var guard = Match("if") ? ParseNamedExpression() : null;
+            cases.Add(At(new MatchCase(pattern, guard, ParseBlock()), caseToken));
+        }
+
+        Match(TokenKind.Dedent);
+
+        if (cases.Count == 0)
+        {
+            throw Error("expected 'case'");
+        }
+
+        return At(new MatchStatement(subject, cases), token);
+    }
+
+    /// <summary>A case's pattern: one pattern, or a bare comma-separated sequence of them.</summary>
+    private Pattern ParseCasePattern()
+    {
+        var token = Current;
+        var first = ParseAsPattern();
+
+        if (!Current.Is(","))
+        {
+            return first;
+        }
+
+        var items = new List<Pattern> { first };
+
+        while (Match(","))
+        {
+            if (Current.Is(":") || Current.Is("if"))
+            {
+                break;
+            }
+
+            items.Add(ParseAsPattern());
+        }
+
+        return At(new MatchSequence(items), token);
+    }
+
+    private Pattern ParseAsPattern()
+    {
+        var token = Current;
+        var pattern = ParseOrPattern();
+
+        if (Match("as"))
+        {
+            var name = Advance();
+
+            if (name.Kind != TokenKind.Name || name.Text == "_")
+            {
+                throw new PythonSyntaxError("invalid pattern target", name.Line, name.Column);
+            }
+
+            return At(new MatchAs(pattern, name.Text), token);
+        }
+
+        return pattern;
+    }
+
+    private Pattern ParseOrPattern()
+    {
+        var token = Current;
+        var alternatives = new List<Pattern> { ParseClosedPattern() };
+
+        while (Match("|"))
+        {
+            alternatives.Add(ParseClosedPattern());
+        }
+
+        return alternatives.Count == 1 ? alternatives[0] : At(new MatchOr(alternatives), token);
+    }
+
+    private Pattern ParseClosedPattern()
+    {
+        var token = Current;
+
+        if (Match("("))
+        {
+            if (Match(")"))
+            {
+                return At(new MatchSequence([]), token);
+            }
+
+            var inner = ParseAsPattern();
+
+            if (!Current.Is(","))
+            {
+                Expect(")");
+                return inner;
+            }
+
+            var items = new List<Pattern> { inner };
+
+            while (Match(","))
+            {
+                if (Current.Is(")"))
+                {
+                    break;
+                }
+
+                items.Add(ParseAsPattern());
+            }
+
+            Expect(")");
+            return At(new MatchSequence(items), token);
+        }
+
+        if (Match("["))
+        {
+            var items = new List<Pattern>();
+
+            while (!Current.Is("]"))
+            {
+                items.Add(ParseAsPattern());
+
+                if (!Match(","))
+                {
+                    break;
+                }
+            }
+
+            Expect("]");
+            return At(new MatchSequence(items), token);
+        }
+
+        if (Match("{"))
+        {
+            return ParseMappingPattern(token);
+        }
+
+        if (Match("*"))
+        {
+            var name = Advance();
+            return At(new MatchStar(name.Text == "_" ? null : name.Text), token);
+        }
+
+        if (token.Kind == TokenKind.Keyword && token.Text is "None" or "True" or "False")
+        {
+            _index++;
+            return At(new MatchSingleton(token.Text switch { "None" => null, "True" => true, _ => (object)false }), token);
+        }
+
+        if (token.Kind == TokenKind.Name)
+        {
+            _index++;
+            Expression reference = At(new Name(token.Text), token);
+            var dotted = false;
+
+            while (Current.Is("."))
+            {
+                _index++;
+                reference = At(new Attribute(reference, Advance().Text), token);
+                dotted = true;
+            }
+
+            if (Current.Is("("))
+            {
+                return ParseClassPattern(reference, token);
+            }
+
+            if (dotted)
+            {
+                return At(new MatchValue(reference), token);
+            }
+
+            return At(new MatchCapture(token.Text == "_" ? null : token.Text), token);
+        }
+
+        return At(new MatchValue(ParseLiteralPatternValue()), token);
+    }
+
+    /// <summary>A literal pattern: a number (possibly negative or complex), or strings.</summary>
+    private Expression ParseLiteralPatternValue()
+    {
+        var token = Current;
+
+        if (token.Kind is TokenKind.String or TokenKind.Bytes)
+        {
+            return ParsePrimary();
+        }
+
+        var negative = Match("-");
+        var number = ParsePrimary();
+
+        if (number is not Literal { Value: BigInteger or double or Complex })
+        {
+            throw new PythonSyntaxError("patterns may only match literals and attribute lookups", token.Line, token.Column);
+        }
+
+        Expression value = negative ? At(new UnaryOp("-", number), token) : number;
+
+        if (Current.Is("+") || Current.Is("-"))
+        {
+            var op = Advance().Text;
+            var imaginary = ParsePrimary();
+            value = At(new BinaryOp(op, value, imaginary), token);
+        }
+
+        return value;
+    }
+
+    private Pattern ParseMappingPattern(Token token)
+    {
+        var keys = new List<Expression>();
+        var patterns = new List<Pattern>();
+        string? rest = null;
+
+        while (!Current.Is("}"))
+        {
+            if (Match("**"))
+            {
+                rest = Advance().Text;
+            }
+            else
+            {
+                var keyToken = Current;
+                Expression key;
+
+                if (keyToken.Kind == TokenKind.Name)
+                {
+                    _index++;
+                    key = At(new Name(keyToken.Text), keyToken);
+
+                    while (Match("."))
+                    {
+                        key = At(new Attribute(key, Advance().Text), keyToken);
+                    }
+                }
+                else if (keyToken.Kind == TokenKind.Keyword && keyToken.Text is "None" or "True" or "False")
+                {
+                    key = ParsePrimary();
+                }
+                else
+                {
+                    key = ParseLiteralPatternValue();
+                }
+
+                Expect(":");
+                keys.Add(key);
+                patterns.Add(ParseAsPattern());
+            }
+
+            if (!Match(","))
+            {
+                break;
+            }
+        }
+
+        Expect("}");
+        return At(new MatchMapping(keys, patterns, rest), token);
+    }
+
+    private Pattern ParseClassPattern(Expression reference, Token token)
+    {
+        Expect("(");
+
+        var positional = new List<Pattern>();
+        var names = new List<string>();
+        var keywordPatterns = new List<Pattern>();
+
+        while (!Current.Is(")"))
+        {
+            if (Current.Kind == TokenKind.Name && Peek().Is("="))
+            {
+                names.Add(Advance().Text);
+                _index++;
+                keywordPatterns.Add(ParseAsPattern());
+            }
+            else
+            {
+                if (names.Count > 0)
+                {
+                    throw Error("positional patterns follow keyword patterns");
+                }
+
+                positional.Add(ParseAsPattern());
+            }
+
+            if (!Match(","))
+            {
+                break;
+            }
+        }
+
+        Expect(")");
+        return At(new MatchClass(reference, positional, names, keywordPatterns), token);
     }
 
     private Statement ParseAsync()
@@ -1191,6 +1540,10 @@ public sealed class Parser
             case TokenKind.Float:
                 _index++;
                 return At(new Literal(double.Parse(token.Text, CultureInfo.InvariantCulture)), token);
+
+            case TokenKind.Imaginary:
+                _index++;
+                return At(new Literal(new Complex(0, double.Parse(token.Text, CultureInfo.InvariantCulture))), token);
 
             case TokenKind.String or TokenKind.FString:
                 return At(ConcatenateStrings(), token);

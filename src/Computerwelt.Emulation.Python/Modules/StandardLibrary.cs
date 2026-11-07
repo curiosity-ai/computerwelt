@@ -90,6 +90,7 @@ public static class StandardLibrary
         ["dataclasses"] = DataclassesModule.Create(machine),
         ["datetime"] = DatetimeModule.Create(timeProvider ?? TimeProvider.System),
         ["math"] = MathModule.Create(),
+        ["cmath"] = CmathModule.Create(),
         ["sys"] = SysModule.Create(machine, arguments, standardInput),
         ["json"] = JsonModule.Create(machine),
         ["random"] = RandomModule.Create(),

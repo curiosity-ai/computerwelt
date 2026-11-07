@@ -487,14 +487,8 @@ public static class BuiltinNamespace
                 // digits left to lose, so the value is already its own rounding.
                 PyFloat value => given is null or PyNone
                     ? PyInt.From(new BigInteger(Math.Round(value.Value, MidpointRounding.ToEven)))
-                    : digits > 15 ? value
-                    : digits >= 0 ? new PyFloat(Math.Round(value.Value, digits, MidpointRounding.ToEven))
-                    // A float rounded away to nothing keeps its sign: -1.5 at a huge
-                    // negative precision is -0.0, not 0.0.
-                    : new PyFloat(Math.CopySign(
-                        (double)RoundToMultiple(
-                            new BigInteger(value.Value), BigInteger.Pow(10, Math.Min(-digits, 400))),
-                        value.Value)),
+                    : digits > 330 ? value
+                    : new PyFloat(RoundFloat(value.Value, digits)),
                 PyInt integer => PyInt.From(RoundToMultiple(integer.Value, BigInteger.Pow(10, -digits))),
                 var other => throw new PyRaise(PyErrors.TypeError(
                     $"type {other.TypeName} doesn't define __round__ method")),
@@ -912,6 +906,90 @@ public static class BuiltinNamespace
     /// This is what <c>round(1250, -2)</c> asks for. Doing it in floating point would lose
     /// the exactness that makes an integer round trip.
     /// </remarks>
+    /// <summary>
+    /// <c>round(x, n)</c> for a float, as CPython does it: on the exact binary value of
+    /// <paramref name="value"/>, half to even, then back to the nearest double.
+    /// </summary>
+    /// <remarks>
+    /// Rounding the double directly (<c>Math.Round</c>) treats <c>2.675</c> as a tie,
+    /// but the double nearest 2.675 is 2.67499999999999982236431605997495353221893310546875,
+    /// so CPython answers 2.67. Working on the exact rational is what gets that right.
+    /// </remarks>
+    internal static double RoundFloat(double value, int digits)
+    {
+        if (value == 0 || !double.IsFinite(value))
+        {
+            return value;
+        }
+
+        // value = mantissa * 2**exponent, exactly.
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        var exponent = (int)((bits >> 52) & 0x7FF);
+        var mantissa = new BigInteger(bits & 0xFFFFFFFFFFFFFL);
+
+        if (exponent == 0)
+        {
+            exponent = 1;
+        }
+        else
+        {
+            mantissa += BigInteger.One << 52;
+        }
+
+        exponent -= 1075;
+
+        // scaled = value * 10**digits = numerator / denominator.
+        var numerator = mantissa;
+        var denominator = BigInteger.One;
+
+        if (exponent >= 0)
+        {
+            numerator <<= exponent;
+        }
+        else
+        {
+            denominator <<= -exponent;
+        }
+
+        if (digits >= 0)
+        {
+            numerator *= BigInteger.Pow(10, digits);
+        }
+        else
+        {
+            denominator *= BigInteger.Pow(10, -digits);
+        }
+
+        var quotient = BigInteger.DivRem(numerator, denominator, out var remainder);
+        var doubled = remainder * 2;
+
+        if (doubled > denominator || (doubled == denominator && !quotient.IsEven))
+        {
+            quotient += 1;
+        }
+
+        double result;
+
+        if (quotient.IsZero)
+        {
+            result = 0;
+        }
+        else
+        {
+            var text = quotient.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "e" + (-digits).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            result = double.Parse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (double.IsInfinity(result))
+        {
+            throw new PyRaise(new PyException(PyExceptionType.OverflowError, "rounded value too large to represent"));
+        }
+
+        // A value rounded away to nothing keeps its sign: -0.4 to 0 digits is -0.0.
+        return Math.CopySign(result, value);
+    }
+
     private static BigInteger RoundToMultiple(BigInteger value, BigInteger multiple)
     {
         var quotient = BigInteger.DivRem(value, multiple, out var remainder);

@@ -66,6 +66,27 @@ public static class Operators
 
     private static PyObject Apply(string op, PyObject left, PyObject right)
     {
+        if ((left is PyComplex || right is PyComplex) && PyComplex.Binary(op, left, right) is { } complex)
+        {
+            return complex;
+        }
+
+        // A bytearray concatenates with any bytes-like value and repeats like bytes; the
+        // result takes the left operand's type, as CPython's does.
+        if ((left is PyByteArray || right is PyByteArray) && op is "+" or "*" or "%")
+        {
+            if (op == "+" && left is PyByteArray or PyBytes && right is PyByteArray or PyBytes)
+            {
+                byte[] joined = [.. Raw(left), .. Raw(right)];
+                return left is PyByteArray ? new PyByteArray(joined) : new PyBytes(joined);
+            }
+
+            var result = Apply(op, PyByteArray.Unwrap(left), PyByteArray.Unwrap(right));
+            return left is PyByteArray || (op == "*" && right is PyByteArray) ? PyByteArray.Rewrap(result) : result;
+
+            static IEnumerable<byte> Raw(PyObject value) => value is PyByteArray a ? a.Value : ((PyBytes)value).Value;
+        }
+
         // Two plain integers, which is most of the arithmetic a program does. Answering
         // here skips the container, instance and datetime questions below — none of which
         // an integer can answer yes to — and the numeric helpers' widening to double.
@@ -155,7 +176,7 @@ public static class Operators
 
     /// <summary>Applies a unary operator.</summary>
     public static PyObject Unary(string op, PyObject operand) =>
-        Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
+        PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
 
     private static PyObject Apply(string op, PyObject operand) => op switch
     {
@@ -210,9 +231,25 @@ public static class Operators
         "<" or "<=" or ">" or ">=" when left is PyCounter counter && right is PyCounter counts =>
             PyBool.Of(PyCounter.Compare(counter, counts, op)),
 
+        // Sets order by inclusion: `a <= b` is "a is a subset of b".
+        "<" or "<=" or ">" or ">=" when left is PySet a && right is PySet b => PyBool.Of(SetOrder(op, a, b)),
+
         "<" or "<=" or ">" or ">=" => Ordering(op, left, right),
         _ => throw new PyRaise(PyErrors.TypeError($"unsupported comparison {op}")),
     };
+
+    private static bool SetOrder(string op, PySet left, PySet right)
+    {
+        bool Subset(PySet small, PySet large) => small.Count <= large.Count && small.Items.All(large.Contains);
+
+        return op switch
+        {
+            "<=" => Subset(left, right),
+            "<" => left.Count < right.Count && Subset(left, right),
+            ">=" => Subset(right, left),
+            _ => right.Count < left.Count && Subset(right, left),
+        };
+    }
 
     /// <summary>
     /// Applies <c>==</c> or <c>!=</c>.
@@ -258,7 +295,18 @@ public static class Operators
             }
         }
 
-        return left is PyInstance || right is PyInstance ? null : PyBool.Of(left.PyEquals(right));
+        if (left is PyInstance || right is PyInstance)
+        {
+            return null;
+        }
+
+        // A complex compares equal to the real number it holds, from either side.
+        if (right is PyComplex && left is not PyComplex)
+        {
+            return PyBool.Of(right.PyEquals(left));
+        }
+
+        return PyBool.Of(left.PyEquals(right));
     }
 
     /// <summary>
@@ -728,6 +776,15 @@ public static class Operators
             {
                 return PyDeque.RepeatInPlace(target, right);
             }
+        }
+
+        // A bytearray grows and repeats in place.
+        if (left is PyByteArray array && op is "+" or "*")
+        {
+            var grown = (PyByteArray)Apply(op, array, right);
+            array.Value.Clear();
+            array.Value.AddRange(grown.Value);
+            return array;
         }
 
         // A Counter's in-place operators mutate it, unlike the binary forms, and accept

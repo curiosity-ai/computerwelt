@@ -180,3 +180,48 @@ public sealed record ImportFrom(string Module, IReadOnlyList<ImportAlias> Names)
 /// <param name="Name">The name in the module.</param>
 /// <param name="Alias">The local name, when renamed with <c>as</c>.</param>
 public readonly record struct ImportAlias(string Name, string? Alias);
+
+/// <summary>A <c>match</c> statement.</summary>
+/// <param name="Subject">The value matched.</param>
+/// <param name="Cases">The <c>case</c> blocks, in order.</param>
+public sealed record MatchStatement(Expression Subject, IReadOnlyList<MatchCase> Cases) : Statement;
+
+/// <summary>One <c>case</c> block.</summary>
+/// <param name="Pattern">The pattern.</param>
+/// <param name="Guard">The <c>if</c> guard, if any.</param>
+/// <param name="Body">The block run on a match.</param>
+public sealed record MatchCase(Pattern Pattern, Expression? Guard, IReadOnlyList<Statement> Body) : PyNode;
+
+/// <summary>Base of every pattern.</summary>
+public abstract record Pattern : PyNode;
+
+/// <summary>A literal or dotted-name pattern, compared with <c>==</c>.</summary>
+public sealed record MatchValue(Expression Value) : Pattern;
+
+/// <summary><c>None</c>, <c>True</c> or <c>False</c>, compared with <c>is</c>.</summary>
+public sealed record MatchSingleton(object? Value) : Pattern;
+
+/// <summary>A capture (<c>x</c>) or, with no name, the wildcard <c>_</c>.</summary>
+public sealed record MatchCapture(string? Name) : Pattern;
+
+/// <summary><c>*rest</c> inside a sequence pattern; no name for <c>*_</c>.</summary>
+public sealed record MatchStar(string? Name) : Pattern;
+
+/// <summary><c>[a, b, *rest]</c> or <c>(a, b)</c>.</summary>
+public sealed record MatchSequence(IReadOnlyList<Pattern> Patterns) : Pattern;
+
+/// <summary><c>{"key": p, **rest}</c>.</summary>
+public sealed record MatchMapping(IReadOnlyList<Expression> Keys, IReadOnlyList<Pattern> Patterns, string? Rest) : Pattern;
+
+/// <summary><c>Point(x, y=0)</c>.</summary>
+public sealed record MatchClass(
+    Expression Class,
+    IReadOnlyList<Pattern> Positional,
+    IReadOnlyList<string> KeywordNames,
+    IReadOnlyList<Pattern> KeywordPatterns) : Pattern;
+
+/// <summary><c>p | q</c>.</summary>
+public sealed record MatchOr(IReadOnlyList<Pattern> Alternatives) : Pattern;
+
+/// <summary><c>p as name</c>.</summary>
+public sealed record MatchAs(Pattern Pattern, string Name) : Pattern;

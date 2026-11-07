@@ -332,6 +332,15 @@ public sealed class Tokenizer
         }
 
         var text = _source[start.._position].Replace("_", string.Empty, StringComparison.Ordinal);
+
+        // A trailing `j` makes any decimal literal imaginary: `2j`, `1.5j`, `1e3j`.
+        if (_position < _source.Length && _source[_position] is 'j' or 'J')
+        {
+            _position++;
+            Emit(TokenKind.Imaginary, text, start, _position - start);
+            return;
+        }
+
         Emit(isFloat ? TokenKind.Float : TokenKind.Integer, text, start, _position - start);
     }
 

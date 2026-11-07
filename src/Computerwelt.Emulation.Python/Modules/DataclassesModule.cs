@@ -1,15 +1,37 @@
+using System.Runtime.CompilerServices;
 using Computerwelt.Emulation.Python.Runtime;
 
 namespace Computerwelt.Emulation.Python.Modules;
 
 /// <summary>The <c>dataclasses</c> module.</summary>
 /// <remarks>
+/// <para>
 /// <c>@dataclass</c> is a decorator that rewrites a class, and the class already exists as
 /// a <see cref="PyClass"/> by the time the decorator runs — so the transformation happens
 /// here at run time rather than in the compiler, exactly as CPython does it.
+/// </para>
+/// <para>
+/// Beyond upstream: <c>field()</c> with every option (<c>default_factory</c> above all),
+/// fields inherited from dataclass bases, <c>__post_init__</c>, <c>order=</c>,
+/// <c>frozen=</c> enforced on assignment, <c>kw_only</c>, <c>__match_args__</c>, and the
+/// recursive <c>asdict</c>/<c>astuple</c> plus <c>replace</c>.
+/// </para>
 /// </remarks>
 public static class DataclassesModule
 {
+    /// <summary>The fields a decorated class has, kept beside it for subclasses to inherit.</summary>
+    private static readonly ConditionalWeakTable<PyClass, List<Field>> FieldTable = new();
+
+    /// <summary><c>dataclasses.MISSING</c>.</summary>
+    private static readonly PyObject Missing = new Sentinel("MISSING");
+
+    /// <summary><c>dataclasses.KW_ONLY</c>.</summary>
+    private static readonly PyObject KeywordOnly = new Sentinel("KW_ONLY");
+
+    /// <summary><c>dataclasses.FrozenInstanceError</c>, an <c>AttributeError</c>.</summary>
+    public static PyExceptionType FrozenInstanceError { get; } =
+        PyExceptionType.DefineHostException("FrozenInstanceError", PyExceptionType.AttributeError);
+
     /// <summary>Builds the module.</summary>
     public static PyModuleObject Create(VirtualMachine machine)
     {
@@ -17,35 +39,69 @@ public static class DataclassesModule
 
         module.Add("dataclass", new PyBuiltinFunction("dataclass", (arguments, keywords) =>
         {
+            var options = Options.From(keywords);
+
             // `@dataclass` and `@dataclass(frozen=True)` are both valid, so a call with no
             // class argument returns a decorator rather than a class.
-            var frozen = keywords is not null
-                && keywords.TryGetValue(new PyStr("frozen"), out var flag)
-                && flag.IsTruthy();
-
-            var eq = keywords is null
-                || !keywords.TryGetValue(new PyStr("eq"), out var wantsEq)
-                || wantsEq.IsTruthy();
-
-            var order = keywords is not null
-                && keywords.TryGetValue(new PyStr("order"), out var wantsOrder)
-                && wantsOrder.IsTruthy();
-
             if (arguments.Length == 0)
             {
-                return new PyBuiltinFunction("dataclass", inner => Decorate(machine, inner[0], frozen, eq, order));
+                return new PyBuiltinFunction("dataclass", inner => Decorate(machine, inner[0], options));
             }
 
-            return Decorate(machine, arguments[0], frozen, eq, order);
+            return Decorate(machine, arguments[0], options);
         }));
 
-        module.Add("field", new PyBuiltinFunction("field", static (_, keywords) =>
-            keywords is not null && keywords.TryGetValue(new PyStr("default"), out var value)
-                ? value
-                : PyNone.Instance));
+        module.Add("field", new PyBuiltinFunction("field", static (arguments, keywords) =>
+        {
+            if (arguments.Length > 0)
+            {
+                throw new PyRaise(PyErrors.TypeError(
+                    $"field() takes 0 positional arguments but {arguments.Length} were given"));
+            }
+
+            PyObject? Keyword(string name) =>
+                keywords is not null && keywords.TryGetValue(new PyStr(name), out var value) ? value : null;
+
+            foreach (var (key, _) in keywords?.Entries ?? [])
+            {
+                if (key.Display() is not ("default" or "default_factory" or "init" or "repr" or "hash"
+                    or "compare" or "metadata" or "kw_only" or "doc"))
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"field() got an unexpected keyword argument '{key.Display()}'"));
+                }
+            }
+
+            var spec = new FieldSpec
+            {
+                Default = Keyword("default") is { } d && !ReferenceEquals(d, Missing) ? d : null,
+                DefaultFactory = Keyword("default_factory") is { } f && !ReferenceEquals(f, Missing) ? f : null,
+                Init = Keyword("init")?.IsTruthy() ?? true,
+                Shown = Keyword("repr")?.IsTruthy() ?? true,
+                Compare = Keyword("compare")?.IsTruthy() ?? true,
+                Hash = Keyword("hash") is { } h and not PyNone ? h.IsTruthy() : null,
+                KwOnly = Keyword("kw_only") is { } k and not PyNone ? k.IsTruthy() : null,
+                Metadata = Keyword("metadata") is { } m and not PyNone ? m : new PyDict(),
+            };
+
+            if (spec.Default is not null && spec.DefaultFactory is not null)
+            {
+                throw new PyRaise(PyErrors.ValueError("cannot specify both default and default_factory"));
+            }
+
+            return spec;
+        }));
+
+        module.Add("MISSING", Missing);
+        module.Add("KW_ONLY", KeywordOnly);
+        module.Add("FrozenInstanceError", FrozenInstanceError);
+        module.Add("InitVar", new TypeAlias("InitVar"));
 
         module.Add("is_dataclass", static arguments =>
-            PyBool.Of(arguments[0] switch
+        {
+            Arity.Exact("is_dataclass", arguments, 1);
+
+            return PyBool.Of(arguments[0] switch
             {
                 PyDataclass => true,
                 PyClass type => type.GetAttribute("__dataclass_fields__") is not null,
@@ -54,45 +110,75 @@ public static class DataclassesModule
                 // `is_dataclass(obj) and not isinstance(obj, type)` idiom work.
                 PyInstance instance => instance.Class.GetAttribute("__dataclass_fields__") is not null,
                 _ => false,
-            }));
-
-        module.Add("asdict", static arguments =>
-        {
-            var dict = new PyDict();
-
-            if (arguments[0] is PyDataclass dataclass)
-            {
-                foreach (var field in dataclass.FieldNames)
-                {
-                    dict.Set(new PyStr(field), dataclass.GetAttribute(field) ?? PyNone.Instance);
-                }
-            }
-            else if (arguments[0] is PyInstance instance)
-            {
-                foreach (var (key, value) in instance.Fields.Entries)
-                {
-                    dict.Set(key, value);
-                }
-            }
-
-            return dict;
+            });
         });
 
-        module.Add("astuple", static arguments =>
+        module.Add("asdict", new PyBuiltinFunction("asdict", (arguments, keywords) =>
         {
-            if (arguments[0] is PyDataclass dataclass)
+            Arity.Exact("asdict", arguments, 1);
+            var factory = keywords is not null && keywords.TryGetValue(new PyStr("dict_factory"), out var given) ? given : null;
+            RequireInstance(arguments[0], "asdict");
+            return Convert(machine, arguments[0], asTuple: false, factory);
+        }));
+
+        module.Add("astuple", new PyBuiltinFunction("astuple", (arguments, keywords) =>
+        {
+            Arity.Exact("astuple", arguments, 1);
+            var factory = keywords is not null && keywords.TryGetValue(new PyStr("tuple_factory"), out var given) ? given : null;
+            RequireInstance(arguments[0], "astuple");
+            return Convert(machine, arguments[0], asTuple: true, factory);
+        }));
+
+        module.Add("replace", new PyBuiltinFunction("replace", (arguments, keywords) =>
+        {
+            Arity.Exact("replace", arguments, 1);
+
+            if (arguments[0] is PyDataclass record)
             {
-                return new PyTuple([.. dataclass.FieldNames.Select(field =>
-                    dataclass.GetAttribute(field) ?? PyNone.Instance)]);
+                return record.GetAttribute("_replace") is { } replace ? machine.Call(replace, [], keywords) : record;
             }
 
-            return arguments[0] is PyInstance instance
-                ? new PyTuple([.. instance.Fields.Entries.Select(static e => e.Value)])
-                : PyTuple.Empty;
-        });
+            if (arguments[0] is not PyInstance instance || FieldsOf(instance.Class) is not { } fields)
+            {
+                throw new PyRaise(PyErrors.TypeError("replace() should be called on dataclass instances"));
+            }
+
+            var changes = new PyDict();
+
+            foreach (var field in fields)
+            {
+                if (keywords is not null && keywords.TryGetValue(new PyStr(field.Name), out var changed))
+                {
+                    if (!field.Init)
+                    {
+                        throw new PyRaise(PyErrors.ValueError(
+                            $"field {field.Name} is declared with init=False, it cannot be specified with replace()"));
+                    }
+
+                    changes.Set(new PyStr(field.Name), changed);
+                }
+                else if (field.Init)
+                {
+                    changes.Set(new PyStr(field.Name), Read(instance, field.Name));
+                }
+            }
+
+            foreach (var (key, _) in keywords?.Entries ?? [])
+            {
+                if (fields.All(field => field.Name != key.Display()))
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"{instance.Class.Name}.__init__() got an unexpected keyword argument '{key.Display()}'"));
+                }
+            }
+
+            return machine.Call(instance.Class, [], changes);
+        }));
 
         module.Add("fields", static arguments =>
         {
+            Arity.Exact("fields", arguments, 1);
+
             var declared = arguments[0] switch
             {
                 PyClass type => type.GetAttribute("__dataclass_fields__"),
@@ -105,31 +191,113 @@ public static class DataclassesModule
                 return new PyTuple([.. descriptors.Entries.Select(static entry => entry.Value)]);
             }
 
-            var names = arguments[0] switch
+            if (arguments[0] is PyDataclass dataclass)
             {
-                PyDataclass dataclass => dataclass.FieldNames,
-                PyInstance instance => [.. instance.Fields.Entries.Select(static e => e.Key.Display())],
-                _ => (IReadOnlyList<string>)[],
-            };
+                return new PyTuple([.. dataclass.FieldNames.Select(static name =>
+                    (PyObject)new PyDataclass("Field", ["name"], [new PyStr(name)], frozen: true))]);
+            }
 
-            return new PyTuple([.. names.Select(static name =>
-                (PyObject)new PyDataclass("Field", ["name"], [new PyStr(name)], frozen: true))]);
+            throw new PyRaise(PyErrors.TypeError("must be called with a dataclass type or instance"));
         });
 
         return module;
     }
 
+    private static void RequireInstance(PyObject value, string function)
+    {
+        if (value is PyDataclass || (value is PyInstance instance && FieldsOf(instance.Class) is not null))
+        {
+            return;
+        }
+
+        throw new PyRaise(PyErrors.TypeError($"{function}() should be called on dataclass instances"));
+    }
+
+    /// <summary>The decorator's switches.</summary>
+    private sealed record Options(
+        bool Init,
+        bool Repr,
+        bool Eq,
+        bool Order,
+        bool UnsafeHash,
+        bool Frozen,
+        bool MatchArgs,
+        bool KwOnly)
+    {
+        public static Options From(PyDict? keywords)
+        {
+            bool Flag(string name, bool fallback) =>
+                keywords is not null && keywords.TryGetValue(new PyStr(name), out var value) ? value.IsTruthy() : fallback;
+
+            foreach (var (key, _) in keywords?.Entries ?? [])
+            {
+                if (key.Display() is not ("init" or "repr" or "eq" or "order" or "unsafe_hash" or "frozen"
+                    or "match_args" or "kw_only" or "slots" or "weakref_slot"))
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"dataclass() got an unexpected keyword argument '{key.Display()}'"));
+                }
+            }
+
+            var options = new Options(
+                Flag("init", true),
+                Flag("repr", true),
+                Flag("eq", true),
+                Flag("order", false),
+                Flag("unsafe_hash", false),
+                Flag("frozen", false),
+                Flag("match_args", true),
+                Flag("kw_only", false));
+
+            if (options.Order && !options.Eq)
+            {
+                throw new PyRaise(PyErrors.ValueError("eq must be true if order is true"));
+            }
+
+            return options;
+        }
+    }
+
+    /// <summary>One field of a dataclass.</summary>
+    private sealed record Field(
+        string Name,
+        PyObject Annotation,
+        PyObject? Default,
+        PyObject? DefaultFactory,
+        bool Init,
+        bool Repr,
+        bool Compare,
+        bool? Hash,
+        bool KwOnly,
+        PyObject Metadata)
+    {
+        public bool HasDefault => Default is not null || DefaultFactory is not null;
+    }
+
+    private static List<Field>? FieldsOf(PyClass type)
+    {
+        foreach (var owner in type.Mro)
+        {
+            if (FieldTable.TryGetValue(owner, out var fields))
+            {
+                return fields;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Turns a plain class into a dataclass: gives it an <c>__init__</c>, a <c>__repr__</c>
-    /// and an <c>__eq__</c> over its annotated fields.
+    /// and an <c>__eq__</c> over its fields, and whatever else the switches ask for.
     /// </summary>
     /// <remarks>
-    /// The fields are the class's annotations, in declaration order, minus the
-    /// <c>ClassVar</c>s — which is exactly how CPython decides, and why annotations are
-    /// retained at run time at all. Defaults are captured here, when the decorator runs,
-    /// rather than read from the class later.
+    /// The fields are the inherited dataclass fields followed by the class's own
+    /// annotations, in declaration order, minus the <c>ClassVar</c>s — which is exactly how
+    /// CPython decides, and why annotations are retained at run time at all. A method the
+    /// class body defines itself is never replaced.
     /// </remarks>
-    private static PyObject Decorate(VirtualMachine machine, PyObject target, bool frozen, bool eq, bool order)
+    private static PyObject Decorate(VirtualMachine machine, PyObject target, Options options)
     {
         if (target is not PyClass type)
         {
@@ -137,130 +305,253 @@ public static class DataclassesModule
         }
 
         var fields = new List<Field>();
-        var seenDefault = false;
 
-        if (type.GetAttribute("__annotations__") is PyDict annotations)
+        // Inherited fields first, in base-to-derived order, each base's list once.
+        for (var i = type.Mro.Count - 1; i >= 1; i--)
         {
-            foreach (var (name, annotation) in annotations.Entries)
+            if (FieldTable.TryGetValue(type.Mro[i], out var inherited))
             {
-                if (IsClassVar(annotation))
+                foreach (var field in inherited)
+                {
+                    var existing = fields.FindIndex(f => f.Name == field.Name);
+
+                    if (existing >= 0)
+                    {
+                        fields[existing] = field;
+                    }
+                    else
+                    {
+                        fields.Add(field);
+                    }
+                }
+            }
+        }
+
+        var keywordOnly = options.KwOnly;
+
+        if (type.Members.TryGetValue(new PyStr("__annotations__"), out var declared) && declared is PyDict annotations)
+        {
+            foreach (var (key, annotation) in annotations.Entries)
+            {
+                var name = key.Display();
+
+                if (IsClassVar(annotation) || IsInitVar(annotation))
                 {
                     continue;
                 }
 
-                var field = name.Display();
-                var hasDefault = type.Members.TryGetValue(new PyStr(field), out var value);
-
-                if (hasDefault && value is PyList or PyDict or PySet)
+                if (IsKeywordOnlyMarker(annotation))
                 {
-                    throw new PyRaise(PyErrors.ValueError(
-                        $"mutable default <class '{value.TypeName}'> for field {field} is not allowed: use default_factory"));
+                    keywordOnly = true;
+                    continue;
                 }
 
-                if (seenDefault && !hasDefault)
-                {
-                    throw new PyRaise(PyErrors.TypeError(
-                        $"non-default argument '{field}' follows default argument '{fields.Last(static f => f.HasDefault).Name}'"));
-                }
+                var field = BuildField(type, name, annotation, keywordOnly);
+                var existing = fields.FindIndex(f => f.Name == name);
 
-                seenDefault |= hasDefault;
-                fields.Add(new Field(field, hasDefault, hasDefault ? value : null));
+                if (existing >= 0)
+                {
+                    fields[existing] = field;
+                }
+                else
+                {
+                    fields.Add(field);
+                }
             }
         }
 
-        var names = fields.Select(static f => f.Name).ToList();
+        // A field without a default may not follow one with a default, among those the
+        // generated `__init__` takes positionally.
+        var positional = fields.Where(static f => f.Init && !f.KwOnly).ToList();
+
+        for (var i = 1; i < positional.Count; i++)
+        {
+            if (!positional[i].HasDefault && positional.Take(i).Any(static f => f.HasDefault))
+            {
+                throw new PyRaise(PyErrors.TypeError(
+                    $"non-default argument '{positional[i].Name}' follows default argument '{positional.Take(i).Last(static f => f.HasDefault).Name}'"));
+            }
+        }
+
+        FieldTable.AddOrUpdate(type, fields);
 
         var descriptors = new PyDict();
 
         foreach (var field in fields)
         {
-            // Every field carries the decorator's defaults: `field()` and the
-            // `@dataclass(...)` switches that vary them are not modelled.
-            descriptors.Set(new PyStr(field.Name), new PyDataclass(
-                "Field",
-                ["name", "type", "default", "init", "repr", "compare", "kw_only", "hash", "doc"],
-                [
-                    new PyStr(field.Name),
-                    type.GetAttribute("__annotations__") is PyDict declared
-                        && declared.TryGetValue(new PyStr(field.Name), out var annotation)
-                        ? annotation
-                        : PyNone.Instance,
-                    field.Default ?? PyNone.Instance,
-                    PyBool.True,
-                    PyBool.True,
-                    PyBool.True,
-                    PyBool.False,
-                    PyNone.Instance,
-                    PyNone.Instance,
-                ],
-                frozen: true));
+            descriptors.Set(new PyStr(field.Name), Describe(field));
         }
 
         type.SetAttribute("__dataclass_fields__", descriptors);
-        type.SetAttribute("__dataclass_frozen__", PyBool.Of(frozen));
+        type.SetAttribute("__dataclass_frozen__", PyBool.Of(options.Frozen));
 
-        if (type.GetAttribute("__init__") is null)
+        bool Own(string name) => type.Members.TryGetValue(new PyStr(name), out _);
+
+        if (options.Init && !Own("__init__"))
         {
-            type.SetAttribute("__init__", new PyBuiltinFunction(
-                $"{type.Name}.__init__",
-                (arguments, keywords) => Initialize(type, fields, arguments, keywords))
+            type.SetAttribute("__init__", Method(type, "__init__", (arguments, keywords) =>
+                Initialize(machine, type, fields, arguments, keywords)));
+        }
+
+        var shown = fields.Where(static f => f.Repr).Select(static f => f.Name).ToList();
+        var compared = fields.Where(static f => f.Compare).Select(static f => f.Name).ToList();
+
+        if (options.Repr && !Own("__repr__"))
+        {
+            type.SetAttribute("__repr__", Method(type, "__repr__", (arguments, _) =>
+                new PyStr(Render(machine, type, shown, arguments[0]))));
+        }
+
+        if (options.Eq && !Own("__eq__"))
+        {
+            type.SetAttribute("__eq__", Method(type, "__eq__", (arguments, _) =>
+                Equal(machine, type, compared, arguments[0], arguments[1])));
+        }
+
+        if (options.Order)
+        {
+            foreach (var (dunder, op) in new[] { ("__lt__", "<"), ("__le__", "<="), ("__gt__", ">"), ("__ge__", ">=") })
             {
-                BindsAsMethod = true,
-            });
+                if (Own(dunder))
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"Cannot overwrite attribute {dunder} in class {type.Name}. Consider using functools.total_ordering"));
+                }
+
+                type.SetAttribute(dunder, Method(type, dunder, (arguments, _) =>
+                    Order(type, compared, arguments[0], arguments[1], op)));
+            }
         }
 
-        if (type.GetAttribute("__repr__") is null)
-        {
-            type.SetAttribute("__repr__", new PyBuiltinFunction(
-                $"{type.Name}.__repr__",
-                arguments => new PyStr(Render(machine, type, names, arguments[0]))));
-        }
+        // CPython's table: a hash is generated for `unsafe_hash`, or for `eq` with `frozen`;
+        // `eq` without `frozen` makes instances unhashable, unless the class wrote its own.
+        var hashed = fields.Where(static f => f.Hash ?? f.Compare).Select(static f => f.Name).ToList();
 
-        if (eq && type.GetAttribute("__eq__") is null)
+        if (!Own("__hash__"))
         {
-            type.SetAttribute("__eq__", new PyBuiltinFunction(
-                $"{type.Name}.__eq__",
-                arguments => Equal(machine, type, names, arguments[0], arguments[1])));
-
-            // Field-wise equality without a matching hash would break the dict invariant,
-            // so an unfrozen dataclass is unhashable unless it says otherwise.
-            if (!frozen && type.GetAttribute("__hash__") is null)
+            if (options.UnsafeHash || (options.Eq && options.Frozen))
+            {
+                type.SetAttribute("__hash__", Method(type, "__hash__", (arguments, _) =>
+                    PyInt.From(HashOf(hashed, arguments[0]))));
+            }
+            else if (options.Eq)
             {
                 type.SetAttribute("__hash__", PyNone.Instance);
             }
         }
-
-        if (frozen && type.GetAttribute("__hash__") is null)
+        else if (options.UnsafeHash)
         {
-            type.SetAttribute("__hash__", new PyBuiltinFunction(
-                $"{type.Name}.__hash__",
-                arguments => PyInt.From(HashOf(machine, names, arguments[0]))));
+            throw new PyRaise(PyErrors.TypeError($"Cannot overwrite attribute __hash__ in class {type.Name}"));
         }
 
-        _ = order;
+        if (options.Frozen)
+        {
+            type.SetAttribute("__setattr__", Method(type, "__setattr__", (arguments, _) =>
+            {
+                var name = arguments[1].Display();
+
+                if (arguments[0] is PyInstance instance && ReferenceEquals(instance.Class, type) || fields.Any(f => f.Name == name))
+                {
+                    throw new PyRaise(new PyException(FrozenInstanceError, $"cannot assign to field '{name}'"));
+                }
+
+                ((PyInstance)arguments[0]).RawSetAttribute(name, arguments[2]);
+                return PyNone.Instance;
+            }));
+
+            type.SetAttribute("__delattr__", Method(type, "__delattr__", (arguments, _) =>
+                throw new PyRaise(new PyException(FrozenInstanceError, $"cannot delete field '{arguments[1].Display()}'"))));
+        }
+
+        if (options.MatchArgs && !Own("__match_args__"))
+        {
+            type.SetAttribute("__match_args__", new PyTuple([.. positional.Select(static f => (PyObject)new PyStr(f.Name))]));
+        }
+
         return type;
     }
 
-    /// <summary>One annotated field of a dataclass.</summary>
-    private sealed record Field(string Name, bool HasDefault, PyObject? Default);
+    private static PyBuiltinFunction Method(PyClass type, string name, Func<PyObject[], PyDict?, PyObject> body) =>
+        new($"{type.Name}.{name}", body) { BindsAsMethod = true, Kind = "function" };
 
-    /// <summary>True for an annotation spelled <c>ClassVar</c> or <c>x.ClassVar</c>.</summary>
-    private static bool IsClassVar(PyObject annotation)
+    /// <summary>Reads one annotated name of the class body into a field, and settles its class attribute.</summary>
+    private static Field BuildField(PyClass type, string name, PyObject annotation, bool keywordOnly)
     {
-        var text = annotation switch
-        {
-            PyStr name => name.Value,
-            _ => annotation.Repr(),
-        };
+        var key = new PyStr(name);
+        var hasValue = type.Members.TryGetValue(key, out var value);
 
-        return text.Contains("ClassVar", StringComparison.Ordinal);
+        if (hasValue && value is FieldSpec spec)
+        {
+            // CPython leaves a plain default on the class and removes a `field()` whose
+            // value comes from a factory, so the class attribute reads as it would there.
+            if (spec.Default is { } specDefault)
+            {
+                type.Members.Set(key, specDefault);
+            }
+            else
+            {
+                type.Members.Remove(key);
+            }
+
+            CheckMutable(name, spec.Default);
+
+            return new Field(
+                name, annotation, spec.Default, spec.DefaultFactory, spec.Init, spec.Shown, spec.Compare,
+                spec.Hash, spec.KwOnly ?? keywordOnly, spec.Metadata);
+        }
+
+        if (hasValue)
+        {
+            CheckMutable(name, value);
+        }
+
+        return new Field(name, annotation, hasValue ? value : null, null, true, true, true, null, keywordOnly, new PyDict());
     }
 
+    private static void CheckMutable(string name, PyObject? value)
+    {
+        if (value is PyList or PyDict or PySet { IsFrozen: false })
+        {
+            throw new PyRaise(PyErrors.ValueError(
+                $"mutable default <class '{value.TypeName}'> for field {name} is not allowed: use default_factory"));
+        }
+    }
+
+    /// <summary>The <c>Field</c> object <c>fields()</c> returns.</summary>
+    private static PyDataclass Describe(Field field) => new(
+        "Field",
+        ["name", "type", "default", "default_factory", "init", "repr", "compare", "kw_only", "hash", "metadata", "doc"],
+        [
+            new PyStr(field.Name),
+            field.Annotation,
+            field.Default ?? Missing,
+            field.DefaultFactory ?? Missing,
+            PyBool.Of(field.Init),
+            PyBool.Of(field.Repr),
+            PyBool.Of(field.Compare),
+            PyBool.Of(field.KwOnly),
+            field.Hash is { } hash ? PyBool.Of(hash) : PyNone.Instance,
+            field.Metadata,
+            PyNone.Instance,
+        ],
+        frozen: true);
+
+    /// <summary>True for an annotation spelled <c>ClassVar</c> or <c>x.ClassVar</c>.</summary>
+    private static bool IsClassVar(PyObject annotation) => AnnotationText(annotation).Contains("ClassVar", StringComparison.Ordinal);
+
+    private static bool IsInitVar(PyObject annotation) => AnnotationText(annotation).Contains("InitVar", StringComparison.Ordinal);
+
+    private static bool IsKeywordOnlyMarker(PyObject annotation) => AnnotationText(annotation) is "KW_ONLY" or "dataclasses.KW_ONLY";
+
+    private static string AnnotationText(PyObject annotation) => annotation is PyStr text ? text.Value : annotation.Repr();
+
     /// <summary>Binds the constructor arguments to the fields, as CPython's generated one does.</summary>
-    private static PyObject Initialize(PyClass type, List<Field> fields, PyObject[] arguments, PyDict? keywords)
+    private static PyObject Initialize(VirtualMachine machine, PyClass type, List<Field> fields, PyObject[] arguments, PyDict? keywords)
     {
         var instance = arguments[0];
         var positional = arguments[1..];
+        var parameters = fields.Where(static f => f.Init).ToList();
+        var ordered = parameters.Where(static f => !f.KwOnly).ToList();
         var bound = new Dictionary<string, PyObject>(StringComparer.Ordinal);
 
         // Keywords bind first, so an unexpected one is reported before an arity error.
@@ -268,15 +559,15 @@ public static class DataclassesModule
         {
             var name = key.Display();
 
-            if (fields.All(field => field.Name != name))
+            if (parameters.All(field => field.Name != name))
             {
                 throw new PyRaise(PyErrors.TypeError(
                     $"{type.Name}.__init__() got an unexpected keyword argument '{name}'"));
             }
 
-            var index = fields.FindIndex(field => field.Name == name);
+            var index = ordered.FindIndex(field => field.Name == name);
 
-            if (index < positional.Length)
+            if (index >= 0 && index < positional.Length)
             {
                 throw new PyRaise(PyErrors.TypeError(
                     $"{type.Name}.__init__() got multiple values for argument '{name}'"));
@@ -285,33 +576,58 @@ public static class DataclassesModule
             bound[name] = value;
         }
 
-        if (positional.Length > fields.Count)
+        if (positional.Length > ordered.Count)
         {
-            var required = fields.Count(static field => !field.HasDefault);
+            var required = ordered.Count(static field => !field.HasDefault);
 
-            throw new PyRaise(PyErrors.TypeError(required == fields.Count
-                ? $"{type.Name}.__init__() takes {fields.Count + 1} positional arguments but {positional.Length + 1} were given"
-                : $"{type.Name}.__init__() takes from {required + 1} to {fields.Count + 1} positional arguments "
+            throw new PyRaise(PyErrors.TypeError(required == ordered.Count
+                ? $"{type.Name}.__init__() takes {ordered.Count + 1} positional arguments but {positional.Length + 1} were given"
+                : $"{type.Name}.__init__() takes from {required + 1} to {ordered.Count + 1} positional arguments "
                   + $"but {positional.Length + 1} were given"));
         }
 
         var missing = new List<string>();
+        var missingKeywords = new List<string>();
 
-        for (var i = 0; i < fields.Count; i++)
+        foreach (var field in fields)
         {
-            var field = fields[i];
+            PyObject? value;
 
-            var value = i < positional.Length ? positional[i]
-                : bound.TryGetValue(field.Name, out var keyword) ? keyword
-                : field.Default;
-
-            if (value is null)
+            if (!field.Init)
             {
-                missing.Add(field.Name);
-                continue;
+                value = field.DefaultFactory is { } factory ? machine.Call(factory, []) : field.Default;
+
+                if (value is null)
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                var index = ordered.IndexOf(field);
+
+                value = index >= 0 && index < positional.Length ? positional[index]
+                    : bound.TryGetValue(field.Name, out var keyword) ? keyword
+                    : field.DefaultFactory is { } factory ? machine.Call(factory, [])
+                    : field.Default;
+
+                if (value is null)
+                {
+                    (field.KwOnly ? missingKeywords : missing).Add(field.Name);
+                    continue;
+                }
             }
 
-            instance.SetAttribute(field.Name, value);
+            // Straight into the instance: a frozen class's `__setattr__` refuses, and the
+            // generated `__init__` is how its fields get their values at all.
+            if (instance is PyInstance target)
+            {
+                target.RawSetAttribute(field.Name, value);
+            }
+            else
+            {
+                instance.SetAttribute(field.Name, value);
+            }
         }
 
         if (missing.Count > 0)
@@ -319,6 +635,18 @@ public static class DataclassesModule
             throw new PyRaise(PyErrors.TypeError(
                 $"{type.Name}.__init__() missing {missing.Count} required positional "
                 + $"argument{(missing.Count == 1 ? string.Empty : "s")}: {Join(missing)}"));
+        }
+
+        if (missingKeywords.Count > 0)
+        {
+            throw new PyRaise(PyErrors.TypeError(
+                $"{type.Name}.__init__() missing {missingKeywords.Count} required keyword-only "
+                + $"argument{(missingKeywords.Count == 1 ? string.Empty : "s")}: {Join(missingKeywords)}"));
+        }
+
+        if (instance is PyInstance created && created.Class.Lookup("__post_init__") is { } postInit)
+        {
+            machine.Call(ClassModel.BindToInstance(machine, postInit, created, created.Class), []);
         }
 
         return PyNone.Instance;
@@ -336,6 +664,8 @@ public static class DataclassesModule
 
     private static string Render(VirtualMachine machine, PyClass type, List<string> names, PyObject instance)
     {
+        _ = machine;
+
         if (!RecursionGuard.TryEnter(instance))
         {
             return "...";
@@ -343,8 +673,9 @@ public static class DataclassesModule
 
         try
         {
-            var parts = names.Select(name => $"{name}={Attribute(machine, type, instance, name).Repr()}");
-            return $"{type.Name}({string.Join(", ", parts)})";
+            var owner = instance is PyInstance created ? created.Class : type;
+            var parts = names.Select(name => $"{name}={Read(instance, name).Repr()}");
+            return $"{owner.Name}({string.Join(", ", parts)})";
         }
         finally
         {
@@ -354,6 +685,8 @@ public static class DataclassesModule
 
     private static PyObject Equal(VirtualMachine machine, PyClass type, List<string> names, PyObject left, PyObject right)
     {
+        _ = type;
+
         // CPython's generated `__eq__` opens with an identity check, so a cyclic instance
         // still compares equal to itself.
         if (ReferenceEquals(left, right))
@@ -361,7 +694,7 @@ public static class DataclassesModule
             return PyBool.True;
         }
 
-        if (right is not PyInstance instance || !ReferenceEquals(instance.Class, type))
+        if (right is not PyInstance other || left is not PyInstance self || !ReferenceEquals(other.Class, self.Class))
         {
             return Builtins.NotImplementedSingleton.Instance;
         }
@@ -374,7 +707,7 @@ public static class DataclassesModule
         {
             // Field comparison uses `==`, which consults `__eq__` even for two references
             // to the same object — unlike container membership, which shortcuts on identity.
-            if (!Operators.Compare("==", Attribute(machine, type, left, name), Attribute(machine, type, right, name)).IsTruthy())
+            if (!Operators.Compare("==", Read(left, name), Read(right, name)).IsTruthy())
             {
                 return PyBool.False;
             }
@@ -383,32 +716,141 @@ public static class DataclassesModule
         return PyBool.True;
     }
 
-    private static System.Numerics.BigInteger HashOf(VirtualMachine machine, List<string> names, PyObject instance)
+    /// <summary>The generated ordering methods: the fields compared as tuples.</summary>
+    private static PyObject Order(PyClass type, List<string> names, PyObject left, PyObject right, string op)
     {
-        var hash = new System.Numerics.BigInteger(17);
+        _ = type;
 
-        foreach (var name in names)
+        if (right is not PyInstance other || left is not PyInstance self || !ReferenceEquals(other.Class, self.Class))
         {
-            hash = (hash * 31) + Attribute(machine, null, instance, name).PyHash();
+            return Builtins.NotImplementedSingleton.Instance;
         }
 
-        return hash;
+        var a = new PyTuple([.. names.Select(name => Read(left, name))]);
+        var b = new PyTuple([.. names.Select(name => Read(right, name))]);
+        return Operators.Compare(op, a, b);
     }
 
+    private static System.Numerics.BigInteger HashOf(List<string> names, PyObject instance) =>
+        new PyTuple([.. names.Select(name => Read(instance, name))]).PyHash();
+
     /// <summary>Reads a field, falling back to the class attribute as attribute access does.</summary>
-    private static PyObject Attribute(VirtualMachine machine, PyClass? type, PyObject instance, string name)
+    private static PyObject Read(PyObject instance, string name) =>
+        instance.GetAttribute(name)
+        ?? throw new PyRaise(new PyException(
+            PyExceptionType.AttributeError,
+            $"'{instance.TypeName}' object has no attribute '{name}'"));
+
+    /// <summary>
+    /// <c>asdict</c> and <c>astuple</c>: a deep copy that turns every dataclass instance it
+    /// meets into a dict (or tuple), and rebuilds lists, tuples and dicts around them.
+    /// </summary>
+    private static PyObject Convert(VirtualMachine machine, PyObject value, bool asTuple, PyObject? factory)
     {
-        _ = machine;
+        using var level = machine.EnterRecursion();
 
-        if (name == "__class__" && instance is PyInstance owner)
+        switch (value)
         {
-            return owner.Class;
-        }
+            case PyInstance instance when FieldsOf(instance.Class) is { } fields:
+            {
+                if (asTuple)
+                {
+                    var items = fields.Select(f => Convert(machine, Read(instance, f.Name), asTuple, factory)).ToList();
+                    return factory is null ? new PyTuple(items) : machine.Call(factory, [new PyList(items)]);
+                }
 
-        return instance.GetAttribute(name)
-            ?? type?.GetAttribute(name)
-            ?? throw new PyRaise(new PyException(
-                PyExceptionType.AttributeError,
-                $"'{instance.TypeName}' object has no attribute '{name}'"));
+                var pairs = fields.Select(f => (PyObject)new PyTuple([new PyStr(f.Name), Convert(machine, Read(instance, f.Name), asTuple, factory)])).ToList();
+
+                if (factory is not null)
+                {
+                    return machine.Call(factory, [new PyList(pairs)]);
+                }
+
+                var dict = new PyDict();
+
+                foreach (var pair in pairs.Cast<PyTuple>())
+                {
+                    dict.Set(pair.Items[0], pair.Items[1]);
+                }
+
+                return dict;
+            }
+
+            case PyDataclass record:
+            {
+                if (asTuple)
+                {
+                    return new PyTuple([.. record.FieldNames.Select(f => Convert(machine, record.GetAttribute(f) ?? PyNone.Instance, asTuple, factory))]);
+                }
+
+                var dict = new PyDict();
+
+                foreach (var field in record.FieldNames)
+                {
+                    dict.Set(new PyStr(field), Convert(machine, record.GetAttribute(field) ?? PyNone.Instance, asTuple, factory));
+                }
+
+                return dict;
+            }
+
+            case PyNamedTuple named:
+                return machine.Call(TypeRegistry.Of(named), [.. named.Items.Select(i => Convert(machine, i, asTuple, factory))]);
+
+            case PyList list:
+                return new PyList([.. list.Items.Select(i => Convert(machine, i, asTuple, factory))]);
+
+            case PyTuple tuple:
+                return new PyTuple([.. tuple.Items.Select(i => Convert(machine, i, asTuple, factory))]);
+
+            case PyDict dict:
+            {
+                var copy = dict.Fresh();
+
+                foreach (var (key, item) in dict.Entries)
+                {
+                    copy.Set(Convert(machine, key, asTuple, factory), Convert(machine, item, asTuple, factory));
+                }
+
+                return copy;
+            }
+
+            default:
+                return value;
+        }
+    }
+
+    /// <summary>The object <c>field(...)</c> returns, consumed by the decorator.</summary>
+    private sealed class FieldSpec : PyObject
+    {
+        public PyObject? Default { get; init; }
+
+        public PyObject? DefaultFactory { get; init; }
+
+        public bool Init { get; init; } = true;
+
+        public bool Shown { get; init; } = true;
+
+        public bool Compare { get; init; } = true;
+
+        public bool? Hash { get; init; }
+
+        public bool? KwOnly { get; init; }
+
+        public PyObject Metadata { get; init; } = new PyDict();
+
+        public override string TypeName => "Field";
+
+        public override string Repr() =>
+            $"Field(name=None,type=None,default={(Default ?? Missing).Repr()},default_factory={(DefaultFactory ?? Missing).Repr()},init={Init},repr={Shown},hash=None,compare={Compare},metadata={Metadata.Repr()},kw_only={(KwOnly is { } k ? k.ToString() : "MISSING")})";
+    }
+
+    /// <summary>A named marker such as <c>MISSING</c>.</summary>
+    private sealed class Sentinel(string name) : PyObject
+    {
+        public override string TypeName => $"_{name}_TYPE";
+
+        public override string Repr() => name;
+
+        public override System.Numerics.BigInteger PyHash() => RuntimeHelpers.GetHashCode(this);
     }
 }

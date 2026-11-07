@@ -1939,6 +1939,90 @@ public sealed class VirtualMachine
                 return false;
             }
 
+            case OpCode.MatchSequenceCheck:
+            {
+                var subject = frame.Peek();
+                var count = instruction.Operand >> 1;
+                var starred = (instruction.Operand & 1) == 1;
+                var length = PatternSequenceLength(subject);
+
+                frame.Push(PyBool.Of(length is { } known && (starred ? known >= count - 1 : known == count)));
+                return false;
+            }
+
+            case OpCode.MatchMappingCheck:
+                frame.Push(PyBool.Of(ClassModel.Unwrap(frame.Peek()) is PyDict));
+                return false;
+
+            case OpCode.MatchKeys:
+            {
+                var keys = ((PyTuple)frame.Pop()).Items;
+                var mapping = (PyDict)ClassModel.Unwrap(frame.Pop());
+                var values = new List<PyObject>(keys.Count);
+                var seen = new PyDict();
+
+                foreach (var key in keys)
+                {
+                    if (seen.Contains(key))
+                    {
+                        throw new PyRaise(PyErrors.ValueError($"mapping pattern checks duplicate key ({key.Repr()})"));
+                    }
+
+                    seen.Set(key, PyNone.Instance);
+
+                    // A plain lookup: a defaultdict's factory must not run for a pattern.
+                    if (!mapping.TryGetValue(key, out var value))
+                    {
+                        frame.Push(PyNone.Instance);
+                        return false;
+                    }
+
+                    values.Add(value);
+                }
+
+                frame.Push(new PyTuple(values));
+                return false;
+            }
+
+            case OpCode.DictWithoutKeys:
+            {
+                var keys = ((PyTuple)frame.Pop()).Items;
+                var mapping = (PyDict)ClassModel.Unwrap(frame.Pop());
+                var rest = new PyDict();
+
+                foreach (var (key, value) in mapping.Entries)
+                {
+                    if (!keys.Any(k => SameOrEqualKey(k, key)))
+                    {
+                        rest.Set(key, value);
+                    }
+                }
+
+                frame.Push(rest);
+                return false;
+            }
+
+            case OpCode.MatchClass:
+            {
+                var names = ((PyTuple)frame.Pop()).Items;
+                var type = frame.Pop();
+                var subject = frame.Pop();
+                frame.Push(MatchClassPattern(subject, type, instruction.Operand, names));
+                return false;
+            }
+
+            case OpCode.ImportStar:
+            {
+                var module = frame.Pop();
+
+                foreach (var (name, value) in PublicNames(module))
+                {
+                    frame.Globals.Set(new PyStr(name), value);
+                }
+
+                return false;
+            }
+
             case OpCode.Assert:
             {
                 var message = instruction.Operand == 1 ? frame.Pop().Display() : string.Empty;
@@ -1947,6 +2031,141 @@ public sealed class VirtualMachine
 
             default:
                 throw new PyRaise(PyErrors.RuntimeError($"unimplemented opcode {instruction.OpCode}"));
+        }
+    }
+
+    /// <summary>
+    /// The length of a value a sequence pattern can match, or null for one it cannot:
+    /// strings and bytes are deliberately not sequences to <c>match</c>, nor are mappings.
+    /// </summary>
+    private static int? PatternSequenceLength(PyObject subject) => ClassModel.Unwrap(subject) switch
+    {
+        PyStr or PyBytes or PyByteArray or PyDict => null,
+        PyList list => list.Items.Count,
+        PyTuple tuple => tuple.Items.Count,
+        PyRange range => range.Length(),
+        PyDeque deque => deque.Length(),
+        _ => null,
+    };
+
+    private static bool SameOrEqualKey(PyObject left, PyObject right) =>
+        ReferenceEquals(left, right) || left.PyEquals(right);
+
+    /// <summary>The types whose class pattern's single positional sub-pattern matches the subject itself.</summary>
+    private static readonly HashSet<string> SelfMatchingTypes = new(StringComparer.Ordinal)
+    {
+        "bool", "bytearray", "bytes", "dict", "float", "frozenset", "int", "list", "set", "str", "tuple",
+    };
+
+    /// <summary>
+    /// <c>case Cls(p1, p2, k=p3)</c>: the subject's attributes, positional ones named by
+    /// <c>__match_args__</c>, or None when the subject is not an instance or lacks one.
+    /// </summary>
+    private PyObject MatchClassPattern(PyObject subject, PyObject type, int positional, IReadOnlyList<PyObject> names)
+    {
+        if (type is not (PyClass or PyType or PyExceptionType or PyNamedTupleType or Computerwelt.Emulation.Python.Modules.DatetimeModule.IPyClassLike))
+        {
+            throw new PyRaise(PyErrors.TypeError("called match pattern must be a class"));
+        }
+
+        if (!TypeRegistry.IsInstance(subject, type))
+        {
+            return PyNone.Instance;
+        }
+
+        var values = new List<PyObject>(positional + names.Count);
+
+        if (positional > 0)
+        {
+            if (type is PyType builtin && SelfMatchingTypes.Contains(builtin.Name))
+            {
+                if (positional > 1)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"{builtin.Name}() accepts 1 positional sub-pattern ({positional} given)"));
+                }
+
+                values.Add(subject);
+            }
+            else
+            {
+                var matchArgs = type switch
+                {
+                    PyNamedTupleType namedTuple => namedTuple.Fields.Select(static f => (PyObject)new PyStr(f)).ToList(),
+                    _ => Attributes.TryGet(this, type, "__match_args__") is { } declared
+                        ? declared is PyTuple tuple
+                            ? tuple.Items.ToList()
+                            : throw new PyRaise(PyErrors.TypeError(
+                                $"{TypeName(type)}.__match_args__ must be a tuple (got {declared.TypeName})"))
+                        : [],
+                };
+
+                if (positional > matchArgs.Count)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"{TypeName(type)}() accepts {matchArgs.Count} positional sub-pattern{(matchArgs.Count == 1 ? string.Empty : "s")} ({positional} given)"));
+                }
+
+                for (var i = 0; i < positional; i++)
+                {
+                    if (Attributes.TryGet(this, subject, matchArgs[i].Display()) is not { } value)
+                    {
+                        return PyNone.Instance;
+                    }
+
+                    values.Add(value);
+                }
+            }
+        }
+
+        foreach (var name in names)
+        {
+            if (Attributes.TryGet(this, subject, name.Display()) is not { } value)
+            {
+                return PyNone.Instance;
+            }
+
+            values.Add(value);
+        }
+
+        return new PyTuple(values);
+
+        static string TypeName(PyObject type) => type is PyCallable callable ? callable.Name : type.TypeName;
+    }
+
+    /// <summary>
+    /// What <c>from m import *</c> binds: the names in <c>__all__</c> when the module
+    /// declares it, otherwise every name not starting with an underscore.
+    /// </summary>
+    private static IEnumerable<(string Name, PyObject Value)> PublicNames(PyObject module)
+    {
+        if (module.GetAttribute("__all__") is { } declared)
+        {
+            foreach (var entry in RequireIterable(declared))
+            {
+                var name = entry.Display();
+
+                yield return (name, module.GetAttribute(name)
+                    ?? throw new PyRaise(PyErrors.AttributeError("module", name)));
+            }
+
+            yield break;
+        }
+
+        var names = module switch
+        {
+            Modules.PyModuleObject builtIn => builtIn.AttributeNames.ToList(),
+            PySourceModule source => source.AttributeNames.ToList(),
+            _ => throw new PyRaise(new PyException(
+                PyExceptionType.ImportError, "import * is not supported for this object")),
+        };
+
+        foreach (var name in names)
+        {
+            if (!name.StartsWith('_') && module.GetAttribute(name) is { } value)
+            {
+                yield return (name, value);
+            }
         }
     }
 

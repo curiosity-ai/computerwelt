@@ -109,6 +109,11 @@ public sealed class PyType : PyCallable
             return new PyBuiltinFunction("fromhex", static arguments => TypeRegistry.FromHex(arguments[0].Display()));
         }
 
+        if (Name == "bytearray" && name == "fromhex")
+        {
+            return new PyBuiltinFunction("fromhex", static arguments => new PyByteArray(TypeRegistry.FromHex(arguments[0].Display()).Value));
+        }
+
         // `dict.fromkeys(...)` is reached through the type, not an instance.
         if (Name == "dict" && name == "fromkeys")
         {
@@ -249,6 +254,18 @@ public static class TypeRegistry
         static value => value is PyBytes,
         static (arguments, keywords) => Builtins.Conversions.ToBytes(arguments, keywords));
 
+    /// <summary><c>complex</c>.</summary>
+    public static PyType Complex { get; } = Define(
+        "complex",
+        static value => value is PyComplex,
+        static (arguments, keywords) => PyComplex.Construct(arguments, keywords));
+
+    /// <summary><c>bytearray</c>.</summary>
+    public static PyType ByteArray { get; } = Define(
+        "bytearray",
+        static value => value is PyByteArray,
+        static (arguments, keywords) => PyByteArray.Construct(arguments, keywords));
+
     /// <summary><c>list</c>.</summary>
     public static PyType List { get; } = Define(
         "list",
@@ -365,6 +382,8 @@ public static class TypeRegistry
         PyFloat => Float,
         PyStr => Str,
         PyBytes => Bytes,
+        PyByteArray => ByteArray,
+        PyComplex => Complex,
         PyList => List,
         PyCounter => PyCounter.Type,
         // A defaultdict reports the type object its own module made, so `type(d) is

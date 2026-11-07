@@ -65,6 +65,34 @@ public enum OpCode
     /// <summary>Pop a value and an object; set the object's attribute.</summary>
     StoreAttr,
 
+    /// <summary>
+    /// Pop a module and bind its public names in the module namespace
+    /// (<c>from m import *</c>).
+    /// </summary>
+    ImportStar,
+
+    /// <summary>
+    /// Pattern matching: push whether the value on top of the stack (left in place) is a
+    /// sequence of the right length. Operand: <c>count &lt;&lt; 1 | hasStar</c>.
+    /// </summary>
+    MatchSequenceCheck,
+
+    /// <summary>Pattern matching: push whether the value on top of the stack (left in place) is a mapping.</summary>
+    MatchMappingCheck,
+
+    /// <summary>Pattern matching: pop a key tuple and a mapping; push the values, or None if a key is missing.</summary>
+    MatchKeys,
+
+    /// <summary>Pattern matching: pop a key tuple and a mapping; push a dict of the other entries.</summary>
+    DictWithoutKeys,
+
+    /// <summary>
+    /// Pattern matching: pop keyword names, a class and a subject; push the attribute tuple
+    /// (positional then keyword), or None when the subject does not match. Operand: the
+    /// positional count.
+    /// </summary>
+    MatchClass,
+
     /// <summary>Pop an object; delete the attribute named by the operand (<c>del obj.x</c>).</summary>
     DeleteAttr,
 

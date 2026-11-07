@@ -27,6 +27,9 @@ public enum TokenKind
     /// <summary>A floating-point literal.</summary>
     Float,
 
+    /// <summary>An imaginary literal (<c>2j</c>); the text is the coefficient.</summary>
+    Imaginary,
+
     /// <summary>A string literal, already decoded.</summary>
     String,
 
