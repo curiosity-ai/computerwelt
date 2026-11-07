@@ -771,6 +771,11 @@ What changed, by where the bytes were:
   dataclass ordering compares field by field instead of building two tuples per comparison;
   `EnterRecursion` and `VirtualMachine.Enter` return structs.
 
+Against CPython 3.13 on the same thirteen workloads (`--vs-cpython`, table in
+`bench/Computerwelt.Benchmarks/README.md`): fresh, the sandbox is 5–200× faster than a fresh
+`python3` process; warm, pure-Python code is 2–12× slower than CPython's `exec`, numpy 13×,
+pandas on par. The interpreter loop itself — calls and boxed arithmetic — is the gap.
+
 Still pointing somewhere: the integer objects a loop over values past the small-int cache
 makes (most of `RunNumericLoop`), the strings text processing makes by nature, and the parse
 and compile of a session cell, which is most of `SessionCell`.

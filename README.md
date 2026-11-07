@@ -280,9 +280,9 @@ committed anywhere in the repository.
 |---|---|---|
 | shell | **2,521 / 2,521** | 73 commands implemented; 27 cases skipped by upstream directive |
 | python | **557 / 558** | parser, bytecode compiler, VM, types, builtins, the stdlib subset, dunders |
-| joined | **210 / 210** | 153 agent-operation tests plus upstream's 57 `python` command cases |
-| extensions | **12 / 12** | fixtures for what this port adds beyond monty |
-| playwright | **40 / 40** | the navigation policy, 22 browser scenarios written as Python, and 5 on context lifetime |
+| joined | **244 / 244** | agent-operation tests plus upstream's 57 `python` command cases |
+| extensions | **67 / 67** | fixtures for what this port adds beyond monty — inheritance, `match`, the extra stdlib, numpy, pandas |
+| playwright | **68 / 68** | the navigation policy, browser scenarios written as Python, context lifetime, scopes |
 
 The one Python fixture that does not pass asserts that a temporary's `id()` is handed to
 the next object of the same shape — an artifact of upstream's slot-recycling heap. Object
@@ -299,6 +299,13 @@ and the defects they surfaced (a generator with two `yield`s crashing the host, 
 `sys.argv`, `sys.exit(n)` not reaching the shell, no `sys.stdin`) were all in code both
 conformance corpora already covered. [`todo.md`](todo.md) lists what it found and what it
 deliberately leaves absent.
+
+**Speed against CPython.** Started fresh, a sandboxed run beats a fresh `python3` process by
+one to two orders of magnitude (no process; CPython needs ~11 ms before its first line, and
+90–390 ms to import numpy or pandas). Warm — a notebook cell against a Jupyter-style `exec` —
+pure-Python code runs 2–12× slower than CPython 3.13, closer where the work is in library
+code. The method, the thirteen shared workloads and the full table are in
+[`bench/Computerwelt.Benchmarks/README.md`](bench/Computerwelt.Benchmarks/README.md#compared-with-cpython).
 
 See [`todo.md`](todo.md) for the ledger and [`CLAUDE.md`](CLAUDE.md) for the architecture
 and the invariants that define "correct".
