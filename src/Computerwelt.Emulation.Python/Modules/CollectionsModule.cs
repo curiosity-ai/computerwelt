@@ -53,6 +53,7 @@ public static class SupportModules
             return new PyNamedTupleType(name, fields, defaults, module);
         }));
 
+        CollectionsExtras.AddCollections(module, machine);
         return module;
     }
 
@@ -432,6 +433,7 @@ public static class SupportModules
             return new PyIterator(rows);
         });
 
+        CollectionsExtras.AddItertools(module, machine);
         return module;
     }
 

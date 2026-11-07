@@ -198,6 +198,22 @@ public sealed class PyExceptionType : PyObject
         return new PyExceptionType(name, baseType ?? Exception);
     }
 
+    /// <summary>
+    /// Defines a host exception class with two bases — <c>calendar.IllegalMonthError</c>
+    /// is both a <c>ValueError</c> and an <c>IndexError</c>, <c>decimal.DivisionByZero</c>
+    /// both a <c>DecimalException</c> and a <c>ZeroDivisionError</c> — so a script catches
+    /// it by either.
+    /// </summary>
+    /// <param name="name">The class name.</param>
+    /// <param name="baseType">The first base.</param>
+    /// <param name="secondBase">The second base.</param>
+    public static PyExceptionType DefineHostException(string name, PyExceptionType baseType, PyExceptionType secondBase)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+
+        return new PyExceptionType(name, baseType, secondBase);
+    }
+
     private static PyExceptionType Define(string name, PyExceptionType? baseType, PyExceptionType? secondBase = null)
     {
         var type = new PyExceptionType(name, baseType, secondBase);
@@ -333,6 +349,45 @@ public sealed class PyExceptionType : PyObject
 
     /// <summary><c>MemoryError</c>.</summary>
     public static PyExceptionType MemoryError { get; } = Define("MemoryError", Exception);
+
+    // The warning categories are builtins in CPython, and the `warnings` module filters,
+    // raises and records them by class — so they are defined here, with the rest.
+
+    /// <summary><c>Warning</c>, the base of every warning category.</summary>
+    public static PyExceptionType Warning { get; } = Define("Warning", Exception);
+
+    /// <summary><c>UserWarning</c>, the default category of <c>warnings.warn</c>.</summary>
+    public static PyExceptionType UserWarning { get; } = Define("UserWarning", Warning);
+
+    /// <summary><c>DeprecationWarning</c>.</summary>
+    public static PyExceptionType DeprecationWarning { get; } = Define("DeprecationWarning", Warning);
+
+    /// <summary><c>PendingDeprecationWarning</c>.</summary>
+    public static PyExceptionType PendingDeprecationWarning { get; } = Define("PendingDeprecationWarning", Warning);
+
+    /// <summary><c>SyntaxWarning</c>.</summary>
+    public static PyExceptionType SyntaxWarning { get; } = Define("SyntaxWarning", Warning);
+
+    /// <summary><c>RuntimeWarning</c>.</summary>
+    public static PyExceptionType RuntimeWarning { get; } = Define("RuntimeWarning", Warning);
+
+    /// <summary><c>FutureWarning</c>.</summary>
+    public static PyExceptionType FutureWarning { get; } = Define("FutureWarning", Warning);
+
+    /// <summary><c>ImportWarning</c>.</summary>
+    public static PyExceptionType ImportWarning { get; } = Define("ImportWarning", Warning);
+
+    /// <summary><c>UnicodeWarning</c>.</summary>
+    public static PyExceptionType UnicodeWarning { get; } = Define("UnicodeWarning", Warning);
+
+    /// <summary><c>BytesWarning</c>.</summary>
+    public static PyExceptionType BytesWarning { get; } = Define("BytesWarning", Warning);
+
+    /// <summary><c>ResourceWarning</c>.</summary>
+    public static PyExceptionType ResourceWarning { get; } = Define("ResourceWarning", Warning);
+
+    /// <summary><c>EncodingWarning</c>.</summary>
+    public static PyExceptionType EncodingWarning { get; } = Define("EncodingWarning", Warning);
 }
 
 /// <summary>

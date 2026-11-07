@@ -136,7 +136,7 @@ public sealed class BinaryFileTests
     }
 
     /// <summary>A filesystem that stores bytes, which is the point of these tests.</summary>
-    private sealed class ByteFileSystem : IPyFileSystem
+    internal sealed class ByteFileSystem : IPyFileSystem
     {
         private readonly Dictionary<string, byte[]> _files = new(StringComparer.Ordinal);
 

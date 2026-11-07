@@ -16,9 +16,12 @@ public sealed class SandboxBoundaryTests
     [
         "subprocess",
         "socket",
-        "urllib",
         "urllib.request",
+        "urllib.error",
+        "urllib.response",
+        "urllib.robotparser",
         "http",
+        "http.client",
         "ctypes",
         "pickle",
         "importlib",
@@ -41,6 +44,26 @@ public sealed class SandboxBoundaryTests
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains("No module named", result.Stderr.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_urllib_package_holds_parsing_and_nothing_that_fetches()
+    {
+        var session = await AgentSession.NewAsync();
+
+        // `import urllib.parse` binds `urllib`, so the package itself is importable — but it
+        // is string manipulation only: no submodule that opens a connection is reachable,
+        // whether imported or looked up as an attribute.
+        var output = await session.OutAsync("""
+            python3 - <<'PY'
+            import urllib
+            import urllib.parse
+            print(urllib.parse.quote('a b'))
+            print([n for n in ('request', 'error', 'response', 'robotparser') if getattr(urllib, n, None) is not None])
+            PY
+            """);
+
+        Assert.Equal("a%20b\n[]\n", output);
     }
 
     [Fact]

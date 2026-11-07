@@ -245,6 +245,26 @@ public static class MathModule
         module.Add("atan2", static arguments =>
             new PyFloat(Math.Atan2(ToDouble(arguments[0]), ToDouble(arguments[1]))));
 
+        module.Add("dist", static arguments =>
+        {
+            Arity.ExactCount("dist", arguments, 2);
+
+            if (arguments[0] is not (PyTuple or PyList) || arguments[1] is not (PyTuple or PyList))
+            {
+                throw new PyRaise(PyErrors.TypeError("dist(): both points must be sequences"));
+            }
+
+            var p = VirtualMachine.RequireIterable(arguments[0]).ToList();
+            var q = VirtualMachine.RequireIterable(arguments[1]).ToList();
+
+            if (p.Count != q.Count)
+            {
+                throw new PyRaise(PyErrors.ValueError("both points must have the same number of dimensions"));
+            }
+
+            return new PyFloat(ExactNorm(p.Zip(q, static (a, b) => Math.Abs(ToDouble(a) - ToDouble(b)))));
+        });
+
         module.Add("hypot", static arguments =>
             new PyFloat(Math.Sqrt(arguments.Sum(a => ToDouble(a) * ToDouble(a)))));
 
@@ -268,9 +288,16 @@ public static class MathModule
 
         // floor, ceil and trunc return int in Python 3, not float — and an infinite or
         // NaN input is an OverflowError or ValueError, not a host crash.
-        module.Add("floor", static arguments => ToInteger(Math.Floor(ToDouble(arguments[0])), "floor"));
-        module.Add("ceil", static arguments => ToInteger(Math.Ceiling(ToDouble(arguments[0])), "ceil"));
-        module.Add("trunc", static arguments => ToInteger(Math.Truncate(ToDouble(arguments[0])), "trunc"));
+        // A module's number type (Decimal, Fraction) answers exactly, as its `__floor__` does.
+        module.Add("floor", static arguments => arguments[0] is IPyNumber hosted
+            ? PyInt.From(hosted.Floor())
+            : ToInteger(Math.Floor(ToDouble(arguments[0])), "floor"));
+        module.Add("ceil", static arguments => arguments[0] is IPyNumber hosted
+            ? PyInt.From(hosted.Ceiling())
+            : ToInteger(Math.Ceiling(ToDouble(arguments[0])), "ceil"));
+        module.Add("trunc", static arguments => arguments[0] is IPyNumber hosted
+            ? PyInt.From(hosted.Truncate())
+            : ToInteger(Math.Truncate(ToDouble(arguments[0])), "trunc"));
 
         module.Add("fabs", static arguments => new PyFloat(Math.Abs(ToDouble(arguments[0]))));
 
@@ -917,8 +944,114 @@ public static class MathModule
     {
         PyInt integer => Numbers.ToDouble(integer.Value),
         PyFloat number => number.Value,
+        IPyNumber hosted => hosted.ToDouble(),
         _ => throw new PyRaise(PyErrors.TypeError($"must be real number, not {value.TypeName}")),
     };
+
+    /// <summary>
+    /// The Euclidean norm of a vector, correctly rounded: the squares are summed exactly as
+    /// integers and the root taken with a sticky bit, so the answer is the double nearest the
+    /// true value — what CPython's <c>vector_norm</c> reaches by compensated arithmetic.
+    /// </summary>
+    private static double ExactNorm(IEnumerable<double> components)
+    {
+        var parts = new List<(BigInteger Mantissa, int Exponent)>();
+        var infinite = false;
+        var nan = false;
+
+        foreach (var value in components)
+        {
+            if (double.IsInfinity(value))
+            {
+                infinite = true;
+                continue;
+            }
+
+            if (double.IsNaN(value))
+            {
+                nan = true;
+                continue;
+            }
+
+            if (value == 0)
+            {
+                continue;
+            }
+
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            var exponent = (int)((bits >> 52) & 0x7FF);
+            var mantissa = bits & 0xFFFFFFFFFFFFFL;
+
+            if (exponent == 0)
+            {
+                exponent = 1;
+            }
+            else
+            {
+                mantissa |= 1L << 52;
+            }
+
+            parts.Add((mantissa, exponent - 1075));
+        }
+
+        if (infinite)
+        {
+            return double.PositiveInfinity;
+        }
+
+        if (nan)
+        {
+            return double.NaN;
+        }
+
+        if (parts.Count == 0)
+        {
+            return 0.0;
+        }
+
+        var lowest = parts.Min(static p => p.Exponent);
+        var sum = BigInteger.Zero;
+
+        foreach (var (mantissa, exponent) in parts)
+        {
+            sum += (mantissa * mantissa) << (2 * (exponent - lowest));
+        }
+
+        // Scale so the root carries at least 56 significant bits, then fold whether it was
+        // exact into the lowest bit, so rounding to 53 bits sees a tie only for a real one.
+        var shift = Math.Max(0, (int)((112 - (long)sum.GetBitLength() + 1) / 2));
+        var scaled = sum << (2 * shift);
+        var root = IntegerSquareRoot(scaled);
+
+        if (root * root != scaled)
+        {
+            root |= BigInteger.One;
+        }
+
+        return Math.ScaleB(Numbers.ToDouble(root), lowest - shift);
+    }
+
+    private static BigInteger IntegerSquareRoot(BigInteger value)
+    {
+        if (value < 2)
+        {
+            return value;
+        }
+
+        var guess = BigInteger.One << (int)((value.GetBitLength() + 1) / 2);
+
+        while (true)
+        {
+            var next = (guess + (value / guess)) / 2;
+
+            if (next >= guess)
+            {
+                return guess;
+            }
+
+            guess = next;
+        }
+    }
 
     private static BigInteger RequireInt(PyObject value) => value switch
     {

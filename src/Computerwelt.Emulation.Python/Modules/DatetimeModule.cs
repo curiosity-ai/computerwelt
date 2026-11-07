@@ -99,6 +99,12 @@ public static class DatetimeModule
             case ("-", PyDateTime moment, PyDelta span):
                 return moment.Shifted(-span.Total);
 
+            // Two datetimes sharing one tzinfo subtract as wall-clock times, offsets ignored,
+            // which is CPython's rule and what makes a ZoneInfo day across a DST change 24h.
+            case ("-", PyDateTime { TzInfo: { } zone } a, PyDateTime b) when ReferenceEquals(zone, b.TzInfo):
+                return PyDelta.FromMicroseconds(
+                    new PyDateTime(a.Parts, null).Instant - new PyDateTime(b.Parts, null).Instant);
+
             case ("-", PyDateTime a, PyDateTime b):
                 return PyDelta.FromMicroseconds(a.Instant - b.Instant);
 
@@ -306,10 +312,10 @@ public static class DatetimeModule
     }
 
     /// <summary>Reads a tzinfo argument, which must be a timezone or None.</summary>
-    private static PyTimeZone? Zone(PyObject? value) => value switch
+    private static PyTzInfo? Zone(PyObject? value) => value switch
     {
         null or PyNone => null,
-        PyTimeZone zone => zone,
+        PyTzInfo zone => zone,
         _ => throw new PyRaise(PyErrors.TypeError(
             $"tzinfo argument must be None or of a tzinfo subclass, not type '{value.TypeName}'")),
     };
@@ -820,8 +826,14 @@ public static class DatetimeModule
 
             "utcnow" => new PyBuiltinFunction("utcnow", _ => Now(null)),
 
-            "fromtimestamp" => new PyBuiltinFunction("fromtimestamp", static arguments =>
+            "fromtimestamp" => new PyBuiltinFunction("fromtimestamp", static (arguments, keywords) =>
             {
+                // `tz` may be given by name, as it usually is with a ZoneInfo.
+                if (keywords?.Entries.FirstOrDefault(static e => e.Key.Display() == "tz").Value is { } named)
+                {
+                    arguments = [.. arguments, named];
+                }
+
                 var seconds = arguments[0] switch
                 {
                     PyInt number => (double)number.Value,
@@ -833,7 +845,7 @@ public static class DatetimeModule
                 var zone = arguments.Length > 1 ? Zone(arguments[1]) : null;
                 var instant = Epoch + new BigInteger(Math.Round(seconds * 1_000_000.0, MidpointRounding.ToEven));
 
-                return new PyDateTime(Split(instant + (zone?.Offset.Total ?? BigInteger.Zero)), zone);
+                return new PyDateTime(Split(instant + (zone?.OffsetAtUtc(instant) ?? BigInteger.Zero)), zone);
             }),
 
             "utcfromtimestamp" => new PyBuiltinFunction("utcfromtimestamp", static arguments =>
@@ -896,7 +908,7 @@ public static class DatetimeModule
             return new PyDateTime(fields, Zone(given[7]));
         }
 
-        private PyObject Now(PyTimeZone? zone)
+        private PyObject Now(PyTzInfo? zone)
         {
             var utc = timeProvider.GetUtcNow();
 
@@ -904,7 +916,7 @@ public static class DatetimeModule
                 + (((((long)utc.Hour * 60) + utc.Minute) * 60L + utc.Second) * 1_000_000L)
                 + Microseconds(utc.Ticks);
 
-            return new PyDateTime(Split(instant + (zone?.Offset.Total ?? BigInteger.Zero)), zone);
+            return new PyDateTime(Split(instant + (zone?.OffsetAtUtc(instant) ?? BigInteger.Zero)), zone);
         }
     }
 

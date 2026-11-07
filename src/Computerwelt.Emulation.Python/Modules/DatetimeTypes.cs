@@ -131,9 +131,41 @@ public sealed class PyDelta : PyObject
     };
 }
 
-/// <summary>A <c>datetime.timezone</c>: a fixed offset from UTC, optionally named.</summary>
-public sealed class PyTimeZone : PyObject
+/// <summary>
+/// A <c>datetime.tzinfo</c>: what an aware datetime asks for its offset, its name and its
+/// daylight-saving adjustment.
+/// </summary>
+/// <remarks>
+/// A fixed <c>timezone</c> answers the same for every moment; a <c>zoneinfo.ZoneInfo</c>
+/// answers by the moment, which is why each question carries the local time it is about.
+/// </remarks>
+public abstract class PyTzInfo : PyObject
 {
+    /// <summary><c>utcoffset(dt)</c> for a datetime with these local fields.</summary>
+    internal abstract PyDelta UtcOffsetAt(DatetimeModule.Fields local);
+
+    /// <summary><c>tzname(dt)</c> for a datetime with these local fields.</summary>
+    internal abstract string TzNameAt(DatetimeModule.Fields local);
+
+    /// <summary><c>dst(dt)</c>: the daylight-saving part of the offset, or None.</summary>
+    internal virtual PyObject DstAt(DatetimeModule.Fields local) => PyNone.Instance;
+
+    /// <summary>The offset in effect at a UTC instant, as <c>fromutc</c> applies it.</summary>
+    internal abstract BigInteger OffsetAtUtc(BigInteger utcMicroseconds);
+}
+
+/// <summary>A <c>datetime.timezone</c>: a fixed offset from UTC, optionally named.</summary>
+public sealed class PyTimeZone : PyTzInfo
+{
+    /// <inheritdoc />
+    internal override PyDelta UtcOffsetAt(DatetimeModule.Fields local) => Offset;
+
+    /// <inheritdoc />
+    internal override string TzNameAt(DatetimeModule.Fields local) => Display();
+
+    /// <inheritdoc />
+    internal override BigInteger OffsetAtUtc(BigInteger utcMicroseconds) => Offset.Total;
+
     private PyTimeZone(PyDelta offset, string? name)
     {
         Offset = offset;
@@ -384,7 +416,7 @@ public sealed class PyDate : PyObject
 /// </remarks>
 public sealed class PyDateTime : PyObject
 {
-    internal PyDateTime(DatetimeModule.Fields fields, PyTimeZone? zone)
+    internal PyDateTime(DatetimeModule.Fields fields, PyTzInfo? zone)
     {
         Parts = fields;
         TzInfo = zone;
@@ -394,7 +426,18 @@ public sealed class PyDateTime : PyObject
     internal DatetimeModule.Fields Parts { get; }
 
     /// <summary>The timezone, or null when the value is naive.</summary>
-    public PyTimeZone? TzInfo { get; }
+    public PyTzInfo? TzInfo { get; }
+
+    /// <summary>The offset from UTC, or null when the value is naive.</summary>
+    internal PyDelta? Offset => TzInfo?.UtcOffsetAt(Parts);
+
+    /// <summary>The same instant as a local time in <paramref name="zone"/>.</summary>
+    internal PyDateTime InZone(PyTzInfo zone)
+    {
+        // A naive datetime is read as UTC: the sandbox has no local zone of its own.
+        var utc = Instant;
+        return new PyDateTime(DatetimeModule.Split(utc + zone.OffsetAtUtc(utc)), zone);
+    }
 
     /// <inheritdoc />
     public override string TypeName => "datetime.datetime";
@@ -408,7 +451,7 @@ public sealed class PyDateTime : PyObject
                 + (((((long)Parts.Hour * 60) + Parts.Minute) * 60L + Parts.Second) * 1_000_000L)
                 + Parts.Microsecond;
 
-            return TzInfo is null ? local : local - TzInfo.Offset.Total;
+            return TzInfo is null ? local : local - TzInfo.UtcOffsetAt(Parts).Total;
         }
     }
 
@@ -467,11 +510,11 @@ public sealed class PyDateTime : PyObject
             text.Append(CultureInfo.InvariantCulture, $".{Parts.Microsecond:D6}");
         }
 
-        if (TzInfo is not null)
+        if (Offset is { } offset)
         {
-            var total = (long)BigInteger.Abs(TzInfo.Offset.Total) / 1_000_000L;
+            var total = (long)BigInteger.Abs(offset.Total) / 1_000_000L;
             text.Append(CultureInfo.InvariantCulture,
-                $"{(TzInfo.Offset.Total.Sign < 0 ? '-' : '+')}{total / 3600:D2}:{total / 60 % 60:D2}");
+                $"{(offset.Total.Sign < 0 ? '-' : '+')}{total / 3600:D2}:{total / 60 % 60:D2}");
 
             if (total % 60 != 0)
             {
@@ -518,6 +561,23 @@ public sealed class PyDateTime : PyObject
         "second" => PyInt.From(Parts.Second),
         "microsecond" => PyInt.From(Parts.Microsecond),
         "tzinfo" => TzInfo ?? (PyObject)PyNone.Instance,
+        "utcoffset" => new PyBuiltinFunction("utcoffset", _ => Offset ?? (PyObject)PyNone.Instance),
+        "tzname" => new PyBuiltinFunction("tzname", _ =>
+            TzInfo is null ? PyNone.Instance : new PyStr(TzInfo.TzNameAt(Parts))),
+        "dst" => new PyBuiltinFunction("dst", _ => TzInfo?.DstAt(Parts) ?? PyNone.Instance),
+        "astimezone" => new PyBuiltinFunction("astimezone", (arguments, keywords) =>
+        {
+            var target = arguments.Length > 0 ? arguments[0]
+                : keywords?.Entries.FirstOrDefault(static e => e.Key.Display() == "tz").Value;
+
+            return target switch
+            {
+                null or PyNone => InZone(PyTimeZone.Utc),
+                PyTzInfo zone => InZone(zone),
+                _ => throw new PyRaise(PyErrors.TypeError(
+                    $"astimezone() argument 1 must be datetime.tzinfo, not {target.TypeName}")),
+            };
+        }),
 
         "isoformat" => new PyBuiltinFunction("isoformat", _ => new PyStr(Isoformat('T'))),
         "strftime" => new PyBuiltinFunction("strftime", (arguments, keywords) =>

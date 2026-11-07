@@ -453,7 +453,10 @@ public static class BuiltinMethods
                         return new PyStr(text.PadLeft(width, fill));
                     }
 
-                    var left = (width - text.Length) / 2;
+                    // CPython's `pad // 2 + (pad & width & 1)`: an odd pad in an odd width
+                    // puts the extra fill on the left, which is what `calendar` lays out by.
+                    var pad = width - text.Length;
+                    var left = (pad / 2) + (pad & width & 1);
                     return new PyStr(new string(fill, left) + text + new string(fill, width - text.Length - left));
                 });
 
