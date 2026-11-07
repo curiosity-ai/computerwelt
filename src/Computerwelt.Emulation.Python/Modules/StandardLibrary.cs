@@ -92,6 +92,23 @@ public static class StandardLibrary
     {
         ArgumentNullException.ThrowIfNull(machine);
 
+        // Modules few programs import are built on first import rather than for every run,
+        // which keeps a run's start-up the cost of what it uses.
+        PyObject? single = name switch
+        {
+            "cmath" => CmathModule.Create(),
+            "enum" => EnumModule.Create(machine),
+            "abc" => AbcModule.Create(machine),
+            "collections.abc" => AbcModule.CreateCollectionsAbc(),
+            "traceback" => TracebackModule.Create(machine),
+            _ => null,
+        };
+
+        if (single is not null)
+        {
+            return single;
+        }
+
         if (name is not ("numpy" or "numpy.linalg" or "numpy.random"))
         {
             return null;
@@ -117,11 +134,6 @@ public static class StandardLibrary
         ["dataclasses"] = DataclassesModule.Create(machine),
         ["datetime"] = DatetimeModule.Create(timeProvider ?? TimeProvider.System),
         ["math"] = MathModule.Create(),
-        ["cmath"] = CmathModule.Create(),
-        ["enum"] = EnumModule.Create(machine),
-        ["abc"] = AbcModule.Create(machine),
-        ["traceback"] = TracebackModule.Create(machine),
-        ["collections.abc"] = AbcModule.CreateCollectionsAbc(),
         ["sys"] = SysModule.Create(machine, arguments, standardInput),
         ["json"] = JsonModule.Create(machine),
         ["random"] = RandomModule.Create(),
