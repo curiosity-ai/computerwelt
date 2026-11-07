@@ -303,8 +303,10 @@ deliberately leaves absent.
 **Speed against CPython.** Started fresh, a sandboxed run beats a fresh `python3` process by
 one to two orders of magnitude (no process; CPython needs ~11 ms before its first line, and
 90–390 ms to import numpy or pandas). Warm — a notebook cell against a Jupyter-style `exec` —
-pure-Python code runs 2–12× slower than CPython 3.13, closer where the work is in library
-code. The method, the thirteen shared workloads and the full table are in
+pure-Python code runs 1.3–9× slower than CPython 3.13, closer where the work is in library
+code; numpy and pandas on large arrays run 1.4–2× behind the real packages, whose kernels are
+C and BLAS, with SIMD kernels of our own (matrix products, single-threaded by design, 4.6×).
+The method, the twenty shared workloads and the full table are in
 [`bench/Computerwelt.Benchmarks/README.md`](bench/Computerwelt.Benchmarks/README.md#compared-with-cpython).
 
 See [`todo.md`](todo.md) for the ledger and [`CLAUDE.md`](CLAUDE.md) for the architecture

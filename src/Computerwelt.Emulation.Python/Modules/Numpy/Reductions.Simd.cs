@@ -30,6 +30,7 @@ internal static partial class Reductions
     private const int Leaf = 4096;
 
     /// <summary>A sum of a contiguous run: vectorised leaves under a pairwise split.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
     internal static double FastSum(ReadOnlySpan<double> values)
     {
         if (values.Length <= Leaf)
@@ -78,6 +79,71 @@ internal static partial class Reductions
         }
 
         return sorted.Length;
+    }
+
+    /// <summary>How many trailing axes are reduced, when the reduced axes are exactly <c>ndim-k..ndim-1</c> with <c>k &lt; ndim</c>; else 0.</summary>
+    private static int TrailingAxes(NdArray array, int[]? axes)
+    {
+        if (axes is null || axes.Length == 0 || axes.Length >= array.NDim)
+        {
+            return 0;
+        }
+
+        var sorted = axes.Order().ToArray();
+        var first = array.NDim - sorted.Length;
+
+        for (var i = 0; i < sorted.Length; i++)
+        {
+            if (sorted[i] != first + i)
+            {
+                return 0;
+            }
+        }
+
+        return sorted.Length;
+    }
+
+    /// <summary>The result shape, kept-dims shape, row count and row width of a trailing-axes reduction.</summary>
+    private static (int[] Shape, int[] Kept, int Rows, int Width) Runs(NdArray array, int trailing)
+    {
+        var shape = array.Shape[..^trailing];
+        var kept = array.Shape.Select((size, d) => d >= array.NDim - trailing ? 1 : size).ToArray();
+        var width = 1;
+
+        for (var d = array.NDim - trailing; d < array.NDim; d++)
+        {
+            width *= array.Shape[d];
+        }
+
+        return (shape, kept, array.Size / Math.Max(width, 1), width);
+    }
+
+    /// <summary>A reduction of each contiguous run of a trailing-axes reduction, into a float result.</summary>
+    private static PyObject? EachRun(NdArray array, int[]? axes, bool keepDims, Func<ReadOnlySpan<double>, double> reduce)
+    {
+        var trailing = TrailingAxes(array, axes);
+
+        if (trailing == 0)
+        {
+            return null;
+        }
+
+        var (shape, kept, rows, width) = Runs(array, trailing);
+
+        if (width == 0)
+        {
+            return null;
+        }
+
+        var data = DoublesOf(array, out _);
+        var result = new double[rows];
+
+        for (var r = 0; r < rows; r++)
+        {
+            result[r] = reduce(data.Slice(r * width, width));
+        }
+
+        return FinishColumns(NdArray.FromDoubles(result, shape), kept, keepDims);
     }
 
     private static PyObject Scalar(NdArray array, double value, bool keepDims) =>
@@ -132,7 +198,7 @@ internal static partial class Reductions
 
         if (leading == 0)
         {
-            return null;
+            return array.Kind == DKind.Float ? EachRun(array, axes, keepDims, static run => FastSum(run)) : null;
         }
 
         var (shape, kept, rows, width) = Columns(array, leading);
@@ -182,7 +248,7 @@ internal static partial class Reductions
 
         if (leading == 0)
         {
-            return null;
+            return EachRun(array, axes, keepDims, run => Moment(name, run, ddof));
         }
 
         var (shape, kept, rows, width) = Columns(array, leading);
@@ -279,11 +345,18 @@ internal static partial class Reductions
             return Scalar(array, smallest ? TensorPrimitives.Min(values) : TensorPrimitives.Max(values), keepDims);
         }
 
-        var leading = LeadingAxes(array, axes);
-
-        if (leading == 0 || array.Kind != DKind.Float)
+        if (array.Kind != DKind.Float)
         {
             return null;
+        }
+
+        var leading = LeadingAxes(array, axes);
+
+        if (leading == 0)
+        {
+            return smallest
+                ? EachRun(array, axes, keepDims, static run => TensorPrimitives.Min(run))
+                : EachRun(array, axes, keepDims, static run => TensorPrimitives.Max(run));
         }
 
         var (shape, kept, rows, width) = Columns(array, leading);

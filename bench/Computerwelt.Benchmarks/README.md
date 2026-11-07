@@ -75,7 +75,7 @@ correct; this decides whether it is quick.
 
 ## Compared with CPython
 
-`Workloads/` holds thirteen small programs that run unchanged under both interpreters — the
+`Workloads/` holds twenty small programs that run unchanged under both interpreters — the
 same bytes, so the comparison is of interpreters and not of ports of a benchmark. Each is
 timed two ways on each side, because "how fast is it" depends on what you would otherwise
 be doing:
@@ -103,39 +103,116 @@ where repeating a run moves a row by 10–30%.
 
 | workload | sandbox fresh | CPython fresh process | sandbox warm | CPython warm | warm ratio |
 |---|--:|--:|--:|--:|--:|
-| `hello` (`x = 1`) | 10 µs | 11.12 ms | 2 µs | 5 µs | 0.3× |
-| `calls` (2,000 calls) | 1.16 ms | 13.21 ms | 850 µs | 159 µs | 5.4× |
-| `fib` (`fib(18)`, recursive) | 4.50 ms | 11.82 ms | 3.40 ms | 275 µs | 12.4× |
-| `numeric_loop` (5,000 iterations) | 1.84 ms | 12.27 ms | 2.06 ms | 340 µs | 6.1× |
-| `classes` (inheritance, `super`, a property) | 2.35 ms | 13.95 ms | 2.46 ms | 369 µs | 6.7× |
-| `match_patterns` | 1.15 ms | 11.66 ms | 1.06 ms | 186 µs | 5.7× |
-| `text` (f-strings, split, dict counting) | 902 µs | 12.28 ms | 974 µs | 224 µs | 4.3× |
-| `regex_scan` | 1.81 ms | 19.28 ms | 1.27 ms | 393 µs | 3.2× |
-| `json_roundtrip` | 863 µs | 20.74 ms | 866 µs | 375 µs | 2.3× |
-| `enums` | 1.40 ms | 17.16 ms | 1.47 ms | 706 µs | 2.1× |
-| `dataclasses_sort` | 1.66 ms | 34.77 ms | 1.61 ms | 1.21 ms | 1.3× |
-| `numpy_array` (100×100, ufuncs, mask, matmul) | 2.29 ms | 89.72 ms | 2.32 ms | 175 µs | 13.2× |
-| `pandas_groupby` (2,000 rows) | 1.90 ms | 386.10 ms | 1.89 ms | 2.28 ms | 0.8× |
+| `hello` (`x = 1`) | 10 µs | 11.38 ms | 2 µs | 4 µs | 0.4× |
+| `calls` (2,000 calls) | 1.20 ms | 12.35 ms | 1.26 ms | 160 µs | 7.9× |
+| `fib` (`fib(18)`, recursive) | 2.64 ms | 11.78 ms | 2.48 ms | 288 µs | 8.6× |
+| `numeric_loop` (5,000 iterations) | 1.82 ms | 12.46 ms | 1.95 ms | 334 µs | 5.8× |
+| `classes` (inheritance, `super`, a property) | 2.23 ms | 12.96 ms | 1.98 ms | 370 µs | 5.4× |
+| `match_patterns` | 951 µs | 12.24 ms | 958 µs | 185 µs | 5.2× |
+| `text` (f-strings, split, dict counting) | 858 µs | 15.35 ms | 944 µs | 276 µs | 3.4× |
+| `regex_scan` | 1.76 ms | 26.22 ms | 1.17 ms | 490 µs | 2.4× |
+| `json_roundtrip` | 920 µs | 20.44 ms | 928 µs | 468 µs | 2.0× |
+| `enums` | 1.50 ms | 16.68 ms | 1.55 ms | 578 µs | 2.7× |
+| `dataclasses_sort` | 1.61 ms | 34.45 ms | 1.56 ms | 1.23 ms | 1.3× |
+| `numpy_array` (100×100, ufuncs, mask, matmul) | 458 µs | 85.04 ms | 309 µs | 170 µs | 1.8× |
+| `np_elementwise` (1M floats, chained ufuncs) | 51.18 ms | 112.12 ms | 34.72 ms | 24.07 ms | 1.4× |
+| `np_int_math` (1M int64) | 10.17 ms | 98.90 ms | 9.53 ms | 6.40 ms | 1.5× |
+| `np_masks` (1M, compare, `&`, `a[m]`, `where`) | 34.37 ms | 108.90 ms | 37.45 ms | 19.96 ms | 1.9× |
+| `np_reductions` (1M, whole and per-axis) | 19.39 ms | 96.37 ms | 18.25 ms | 9.49 ms | 1.9× |
+| `np_matmul` (200×200 products) | 2.31 ms | 84.62 ms | 2.11 ms | 459 µs | 4.6× |
+| `np_linalg` (`inv`, `solve`, `det` at 120×120) | 1.53 ms | 85.18 ms | 1.18 ms | 706 µs | 1.7× |
+| `pandas_groupby` (2,000 rows) | 1.14 ms | 308.95 ms | 945 µs | 2.37 ms | 0.4× |
+| `pd_numeric` (100,000 rows) | 106.91 ms | 458.93 ms | 108.59 ms | 30.63 ms | 3.5× |
 
 ### Reading it
 
 - **Started fresh, the sandbox wins by one to two orders of magnitude**, because there is no
   process: CPython spends about 11 ms starting before it runs a line, and importing numpy
-  (90 ms) or pandas (386 ms) dwarfs every workload here. That is the comparison that matters
+  (85 ms) or pandas (309 ms) dwarfs every workload here. That is the comparison that matters
   when the alternative to an in-process sandbox is a subprocess per untrusted program.
-- **Warm, pure-Python bytecode runs 2–12× slower than CPython 3.13.** The gap is widest
+- **Warm, pure-Python bytecode runs 1.3–9× slower than CPython 3.13.** The gap is widest
   where the work is the interpreter loop itself — calls (`fib`, `calls`), arithmetic on
-  boxed integers (`numeric_loop`) — and narrows to 1.3–2.3× where most of the time is in
-  library code written in C on CPython's side and in C# on ours (`json`, `enum`,
-  `dataclasses`). CPython 3.13 has an adaptive specializing interpreter and decades of
-  tuning; this VM is a straightforward one, and it is the thing to make faster next.
-- **numpy is 13× slower warm**: CPython's numpy is vectorised C, this one is scalar managed
-  loops over typed arrays, with per-call overhead that dominates at this size. **pandas is a
-  little faster than real pandas** on a small frame, because real pandas' per-call overhead
-  (index alignment, dtype dispatch, block management) is large next to 2,000 rows; on large
-  frames real pandas' vectorised kernels would win.
+  boxed integers (`numeric_loop`) — and narrows where most of the time is in library code
+  written in C on CPython's side and in C# on ours (`json`, `enum`, `dataclasses`). CPython
+  3.13 has an adaptive specializing interpreter and decades of tuning; this VM is a
+  straightforward one.
+- **numpy on a million elements is 1.4–1.9× behind real numpy**, both running vectorised
+  kernels; what is left is mostly allocation (every intermediate is a fresh 8 MB array the
+  GC has to clear and collect) and the first calls of each kernel, below. **Matrix products
+  are 4.6× behind**: numpy hands them to a multi-threaded BLAS, and this sandbox will not
+  spread one tenant's program over the host's cores.
+- **pandas is faster than real pandas on a small frame** (per-call overhead dominates at
+  2,000 rows) and 3.5× behind on 100,000 rows — where most of the sandbox's time is the
+  workload building its three columns as Python list comprehensions, which is the
+  interpreter, not pandas.
 - `hello` shows the floor: a cell or a run that does nothing costs microseconds, which is
   what makes a sandbox per request affordable.
+
+## The numeric kernels
+
+The numpy and pandas halves were rewritten for speed in one round; the warm ratios against
+the real packages, on the workloads above:
+
+| workload | before | after |
+|---|--:|--:|
+| `np_elementwise` | 7.3× | 1.4× |
+| `np_int_math` | 6.8× | 1.5× |
+| `np_masks` | 5.1× | 1.9× |
+| `np_reductions` | 8.1× | 1.9× |
+| `np_matmul` | 31.9× | 4.6× |
+| `np_linalg` | 6.9× | 1.7× |
+| `numpy_array` | 13.2× | 1.8× |
+| `pd_numeric` | 4.1× | 3.5× |
+
+What does the work:
+
+- **Element-wise ufuncs** on contiguous operands of 64 elements or more (or one operand a
+  scalar) go to `System.Numerics.Tensors.TensorPrimitives` — AVX2/AVX-512 on x64, AdvSimd
+  on Arm — and comparisons to a `Vector256` loop that writes four bools per store
+  (`Modules/Numpy/NdSimd.cs`). `//`, `%` and `fmod` are typed loops over the exact scalar
+  rule; int64 wraps as numpy's does.
+- **Masks** — `a[m]`, `a[m] = v`, `np.where`, `count_nonzero` — read the mask eight bytes
+  at a time, skipping clear words and copying full ones (`NdSimd.Masks.cs`).
+- **Reductions** over the whole array, the leading axes (row-wise vector adds, as numpy does)
+  or the trailing axes (each output one contiguous run) read the buffer in place
+  (`Reductions.Simd.cs`).
+- **Matrix products** above 2^14 multiply-adds use a packed GEMM with a 4×8 block of
+  `Vector256` FMA accumulators (`LinAlg.Gemm.cs`); `inv` and `solve` update whole rows.
+- **pandas columns** hold `double[]`/`long[]`/`bool[]` and box only when something reads
+  them one object at a time, so column arithmetic, comparison, masks, reductions and
+  single-key groupby never touch a `PyObject` (`Modules/Pandas/PdVector.cs`).
+
+### Accuracy
+
+Small arrays — under 64 elements, and products under 2^14 multiply-adds — take the exact
+paths they always took, so the small results a program prints are unchanged. Above that:
+
+| operation | difference from the scalar result |
+|---|---|
+| `+ - * /`, comparisons, `sqrt`, `abs`, `floor`, min/max, masks, `where`, int64 anything | none: single IEEE operations either way |
+| `exp`, `log`, `sin`, `tanh`, `arctan2`, … | the vectorised implementations' few ulps (fixture: within 1e-12 relative) |
+| `sum`, `mean`, `var`, `std` | a different association than numpy's eight-way pairwise blocks: last digits |
+| matrix products | sums in FMA over 256-deep blocks, as BLAS does: last digits; integer-valued data exact |
+| pandas reductions | none: numpy's pairwise sum, now as two vector accumulators, bit for bit |
+| `x ** y` | none: `TensorPrimitives.Pow` is exact. `exp(y·log x)` was 1.8× faster and rejected, because it printed `4.0 ** 1.5` as `7.999999999999998` |
+
+`tests/monty-extensions/numpy__vectorised_paths.py` and `pandas__unboxed_columns.py` check
+every path at sizes that take it against a pure-Python computation, and pass under CPython
+with the real packages too.
+
+### The first calls of a kernel
+
+.NET compiles a method at a low optimisation tier first and recompiles it once it is hot;
+ReadyToRun cannot precompile `TensorPrimitives`' AVX paths, so its methods also start at that
+tier. In a busy interpreter promotion can take a while: a 1M-element `sum` timed 40 times
+took 1.5 ms best, 200 times 0.29 ms. The port's own kernels carry
+`MethodImplOptions.AggressiveOptimization` and are full speed from their first call (the
+pandas pairwise sum ran 80× slower without it). For `TensorPrimitives` the choice is the
+host's: `<TieredCompilationQuickJitForLoops>false</TieredCompilationQuickJitForLoops>` (or
+`DOTNET_TC_QuickJitForLoops=0`) makes every method with a loop compile optimised at once,
+which brought the 40-run `sum` to 0.32 ms and cost 60–150 ms of process start-up here — worth
+it for a long-lived notebook host doing numeric work, not for a process per short script.
+The CLIs and the benchmarks keep the runtime's default.
 
 None of this is a ratchet. Re-run both commands when the interpreter changes, and update the
 table with the numbers you measured.

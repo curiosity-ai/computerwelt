@@ -821,11 +821,21 @@ internal static partial class LinAlg
 
     public static PyObject Norm(PyObject value, PyObject? ord, PyObject? axis, bool keepDims)
     {
-        var x = NdConvert.ToArray(value).AsType(NdDType.Float64);
+        var source = NdConvert.ToArray(value);
+        var x = source.Kind == DKind.Float ? source : source.AsType(NdDType.Float64);
         var axes = NdConvert.ToAxes(axis, x.NDim);
 
         if (axes is null && ord is null or PyNone)
         {
+            // numpy takes a 2-norm as the square root of a dot product, which is what a
+            // large contiguous array gets here too.
+            if (x.Size >= NdSimd.Threshold && x.IsContiguous)
+            {
+                var span = x.Buffer.F.AsSpan(x.Offset, x.Size);
+                var norm = Math.Sqrt(TensorPrimitives.Dot(span, span));
+                return keepDims ? NdArray.FromDoubles([norm], [.. Enumerable.Repeat(1, x.NDim)]) : new PyFloat(norm);
+            }
+
             var values = x.ToDoubles();
             var total = 0.0;
 

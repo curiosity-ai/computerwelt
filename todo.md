@@ -264,7 +264,9 @@ legacy seeded stream reproduces numpy's. Operators reach it through `IPyOperand`
 build at most 2^24 elements and do 2^30 element operations. Absent: numpy scalar types
 (elements are Python numbers), complex dtypes, general `eig`/`svd`/`qr`, `out=`/`where=`,
 structured and datetime dtypes, file I/O. `default_rng` is deterministic but not PCG64.
-Eight `numpy__*.py` fixtures.
+Large contiguous operations run on SIMD kernels (see "numpy and pandas, SIMD round" below),
+which can differ from numpy in the last digits of transcendentals, sums and matrix
+products; under 64 elements every path is the exact one. Nine `numpy__*.py` fixtures.
 
 ### pandas  (`Modules/Pandas/`)
 
@@ -275,8 +277,9 @@ rolling/expanding windows and missing-data methods; groupby (named aggregation,
 `.str` and `.dt`; `read_csv`/`to_csv`/`read_json`/`to_json` over the VFS (a URL is refused);
 `query`/`eval` over a parser of its own that refuses dunders; text display with pandas'
 truncation and `_repr_html_`, so a session shows a frame as a table. `.values`/`to_numpy()`
-return numpy arrays. One call may build at most 2^24 cells. Eight `pandas__*.py` fixtures and
-`PandasHostTests`.
+return numpy arrays. One call may build at most 2^24 cells. Numeric columns are stored
+unboxed (`double[]`/`long[]`/`bool[]`) and boxed on first object-wise read. Nine
+`pandas__*.py` fixtures and `PandasHostTests`.
 
 It finds its run through `VirtualMachine.Running` (set for the span of a run, keyed by
 machine) rather than thread state of its own: a session's cells can land on different
@@ -779,6 +782,45 @@ pandas on par. The interpreter loop itself — calls and boxed arithmetic — is
 Still pointing somewhere: the integer objects a loop over values past the small-int cache
 makes (most of `RunNumericLoop`), the strings text processing makes by nature, and the parse
 and compile of a session cell, which is most of `SessionCell`.
+
+## Performance — numpy and pandas, SIMD round
+
+Warm ratios against the real packages went from 5–32× to 1.4–1.9× on million-element numpy
+work, 4.6× for matrix products and 3.5× on a 100,000-row pandas frame (table, method and
+the accuracy notes in `bench/Computerwelt.Benchmarks/README.md`, "The numeric kernels").
+
+- **numpy element-wise** (`NdSimd.cs`): contiguous operands of 64+ elements, or a scalar,
+  go to `TensorPrimitives`; comparisons are `Vector256` compares stored four bools at a
+  time; `//`, `%`, `fmod` are typed loops over the exact rule; int/int true division is a
+  float loop; int64 times a scalar is a `Vector256` loop (the primitive's scalar form is
+  not vectorised). Results are allocated uninitialised.
+- **Masks** (`NdSimd.Masks.cs`): `a[m]`, `a[m] = scalar`, `where`, `count_nonzero`, bool
+  `sum`, eight mask bytes per test.
+- **Reductions** (`Reductions.Simd.cs`): whole array, leading axes and trailing axes, for
+  `sum`, `mean`/`var`/`std`, `min`/`max`, `argmin`/`argmax`; `norm` is a dot product.
+- **Matrix products** (`LinAlg.Gemm.cs`): packed 4×8 `Vector256` FMA GEMM above 2^14
+  multiply-adds, dot products for matrix-vector, row axpys for vector-matrix, i-k-j int64.
+  Single-threaded on purpose. LU and the triangular solves update rows with `MultiplyAdd`,
+  rounding exactly as the scalar loops did.
+- **pandas** (`PdCore.cs`, `PdVector.cs`): numeric columns are unboxed arrays, boxed on
+  demand; operators, comparisons, `& | ^`, reductions, boolean selection, `Take` and
+  single int/float-key groupby read them. `RangeIndex` is unboxed too. The pairwise sum is
+  numpy's, now in two vector accumulators, bit for bit.
+- **Tiering**: short-loop kernels sat at tier 0 inside the busy interpreter (the pandas
+  pairwise sum 80× below its optimised speed), so the port's kernels carry
+  `AggressiveOptimization`. `TensorPrimitives` cannot be marked; a host may set
+  `TieredCompilationQuickJitForLoops=false` (60–150 ms of start-up for full speed from the
+  first call). Nothing in this repository sets it.
+
+Tried and rejected: `x ** y` as `exp(y·log x)` (1.8× faster, but `4.0 ** 1.5` printed as
+`7.999999999999998`); spreading GEMM over cores (one tenant's program would take the host's
+CPUs).
+
+Still pointing somewhere: allocation — every intermediate of a million-element expression is
+a fresh 8 MB large-object array the GC clears and collects, which is most of what separates
+`np_elementwise` from numpy now; matrix products past what one core does (AVX-512 kernels
+would roughly double it where available); pandas columns built from Python lists, whose cost
+is the interpreter; `groupby` on multiple or string keys, which still hashes boxed keys.
 
 ## Performance
 

@@ -1128,7 +1128,14 @@ internal static class NumpyModule
 
             var length = Math.Max(0, (long)Math.Ceiling((double)(b - a) / s));
             NdArray.CheckedSize([(int)Math.Min(length, int.MaxValue)]);
-            return NdArray.Vector([.. Enumerable.Range(0, (int)length).Select(i => a + (i * s))]);
+            var longs = GC.AllocateUninitializedArray<long>((int)length);
+
+            for (var i = 0; i < longs.Length; i++)
+            {
+                longs[i] = a + (i * s);
+            }
+
+            return NdArray.FromLongs(longs, [longs.Length]);
         }
 
         var (x, y, z) = (NdArray.ToDouble(start), NdArray.ToDouble(stop), NdArray.ToDouble(step));

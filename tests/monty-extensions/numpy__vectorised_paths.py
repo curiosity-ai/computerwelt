@@ -159,3 +159,13 @@ inv = np.linalg.inv(sq)
 assert float(np.abs(inv @ sq - np.eye(70)).max()) < 1e-12
 sol = np.linalg.solve(sq, np.arange(70.0))
 assert float(np.abs(sq @ sol - np.arange(70.0)).max()) < 1e-10
+
+# Trailing-axis reductions read each output's run in place.
+all_close(m.mean(axis=1), [math.fsum(row) / 20 for row in rows], rel=1e-12)
+row_means = [math.fsum(row) / 20 for row in rows]
+all_close(m.std(axis=1), [math.sqrt(math.fsum((v - row_means[r]) ** 2 for v in row) / 20) for r, row in enumerate(rows)], rel=1e-11)
+assert m.max(axis=1).tolist() == [max(row) for row in rows] and m.min(axis=-1).tolist() == [min(row) for row in rows]
+cube = a.reshape(10, 5, 20)
+all_close(cube.sum(axis=(1, 2)), [math.fsum(xs[i * 100:(i + 1) * 100]) for i in range(10)], rel=1e-12)
+assert cube.sum(axis=2, keepdims=True).shape == (10, 5, 1)
+assert close(float(np.linalg.norm(k)), math.sqrt(sum(i * i for i in range(N))), rel=1e-12)
