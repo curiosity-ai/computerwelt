@@ -468,6 +468,7 @@ public static class DataclassesModule
             type.SetAttribute("__match_args__", new PyTuple([.. positional.Select(static f => (PyObject)new PyStr(f.Name))]));
         }
 
+        PyClass.NamespaceChanged();
         return type;
     }
 

@@ -220,7 +220,11 @@ internal static class EnumModule
         _ => null,
     };
 
-    private static void Set(PyClass type, string name, PyObject value) => type.Members.Set(new PyStr(name), value);
+    private static void Set(PyClass type, string name, PyObject value)
+    {
+        type.Members.Set(new PyStr(name), value);
+        PyClass.NamespaceChanged();
+    }
 
     private static PyBuiltinFunction Function(string name, Func<PyObject[], PyObject> body) => new(name, body);
 
@@ -330,6 +334,8 @@ internal static class EnumModule
                 state.ByName[name] = member;
                 type.Members.Set(key, member);
             }
+
+            PyClass.NamespaceChanged();
         }
 
         private static bool IsMemberCandidate(string name, PyObject value) =>

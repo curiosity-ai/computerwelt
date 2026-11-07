@@ -176,8 +176,67 @@ public sealed class PyClass : PyCallable
     /// <summary>True when this class is <paramref name="other"/> or derives from it.</summary>
     public bool IsSubclassOf(PyClass other) => _mro.Contains(other);
 
+    /// <summary>
+    /// Bumped whenever any class's namespace changes, which is what invalidates every
+    /// lookup cache: a subclass caches what it found on its bases, so a change to a base
+    /// has to reach it, and a global counter is the cheapest way to say "something changed".
+    /// Classes rarely change after they are built, so the caches almost never refill.
+    /// </summary>
+    private static int s_epoch;
+
+    private readonly Dictionary<string, PyObject?> _lookups = new(StringComparer.Ordinal);
+    private int _lookupEpoch = -1;
+
+    /// <summary>Records that a class namespace changed, so cached lookups are redone.</summary>
+    public static void NamespaceChanged() => Interlocked.Increment(ref s_epoch);
+
+    private int _shapeEpoch = -1;
+    private bool _plainAttributes;
+
+    /// <summary>
+    /// True when reading an attribute of an instance can start with the instance's own
+    /// fields: no class along the MRO defines <c>__getattribute__</c> or a data descriptor
+    /// (a property, or an object with <c>__set__</c>) that would have to win over them.
+    /// Most classes are like this, and it is the hot path of every <c>self.x</c>.
+    /// </summary>
+    internal bool HasPlainAttributes
+    {
+        get
+        {
+            var epoch = Volatile.Read(ref s_epoch);
+
+            if (_shapeEpoch != epoch)
+            {
+                _plainAttributes = Lookup("__getattribute__") is not PyFunction
+                    && !_mro.Any(static type => type.Members.Entries.Any(static e => ClassModel.IsDataDescriptor(e.Value)));
+                _shapeEpoch = epoch;
+            }
+
+            return _plainAttributes;
+        }
+    }
+
     /// <summary>Finds an attribute along the MRO without binding it.</summary>
     public PyObject? Lookup(string name)
+    {
+        var epoch = Volatile.Read(ref s_epoch);
+
+        if (_lookupEpoch != epoch)
+        {
+            _lookups.Clear();
+            _lookupEpoch = epoch;
+        }
+        else if (_lookups.TryGetValue(name, out var cached))
+        {
+            return cached;
+        }
+
+        var found = Walk(name);
+        _lookups[name] = found;
+        return found;
+    }
+
+    private PyObject? Walk(string name)
     {
         var key = new PyStr(name);
 
@@ -251,7 +310,9 @@ public sealed class PyClass : PyCallable
             case "__base__":
                 return Bases.Count == 0 ? TypeRegistry.Object : Bases[0];
             case "__dict__":
-                return Members;
+                // A copy, as CPython's mappingproxy is read-only: the namespace changes
+                // only through attribute assignment, which keeps the lookup caches honest.
+                return Members.Copy();
             case "__class__":
                 return TypeRegistry.Type;
         }
@@ -304,6 +365,7 @@ public sealed class PyClass : PyCallable
         }
 
         Members.Set(new PyStr(name), value);
+        NamespaceChanged();
         return true;
     }
 
@@ -319,6 +381,7 @@ public sealed class PyClass : PyCallable
         }
 
         Members.Remove(key);
+        NamespaceChanged();
         return true;
     }
 
@@ -848,6 +911,13 @@ public sealed class PyInstance : PyObject
     /// </remarks>
     public override PyObject? GetAttribute(string name)
     {
+        // The common case: no override and no data descriptor, so an instance field, if
+        // there is one, is the answer.
+        if (Class.HasPlainAttributes)
+        {
+            return Fields.TryGetValue(new PyStr(name), out var own) ? own : RawGetAttribute(name);
+        }
+
         if (Class.Lookup("__getattribute__") is PyFunction custom && _machine is { } machine)
         {
             try
