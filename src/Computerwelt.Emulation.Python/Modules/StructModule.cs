@@ -35,6 +35,40 @@ public static class StructModule
         module.Add("error", Error);
         module.Add("calcsize", arguments => PyInt.From(Compile(Format(arguments, "calcsize")).Size));
         module.Add("pack", arguments => Compile(Format(arguments, "pack")).Pack(arguments[1..]));
+        // `pack_into(format, buffer, offset, *values)`: pack straight into a bytearray.
+        module.Add("pack_into", arguments =>
+        {
+            if (arguments.Length < 3)
+            {
+                throw new PyRaise(PyErrors.TypeError("pack_into expected at least 3 arguments"));
+            }
+
+            var packed = Compile(Format(arguments, "pack_into")).Pack(arguments[3..]).Value;
+
+            if (arguments[1] is not PyByteArray buffer)
+            {
+                throw new PyRaise(PyErrors.TypeError(
+                    $"argument must be read-write bytes-like object, not {arguments[1].TypeName}"));
+            }
+
+            var offset = (long)Builtins.BuiltinNamespace.RequireInt(arguments[2], "pack_into");
+            offset = offset < 0 ? offset + buffer.Value.Count : offset;
+
+            if (offset < 0 || offset + packed.Length > buffer.Value.Count)
+            {
+                throw new PyRaise(new PyException(Error, offset < 0
+                    ? $"offset {offset - buffer.Value.Count} out of range for {buffer.Value.Count}-byte buffer"
+                    : $"pack_into requires a buffer of at least {packed.Length + offset} bytes for packing {packed.Length} bytes at offset {offset} (actual buffer size is {buffer.Value.Count})"));
+            }
+
+            for (var i = 0; i < packed.Length; i++)
+            {
+                buffer.Value[(int)offset + i] = packed[i];
+            }
+
+            return PyNone.Instance;
+        });
+
         module.Add("unpack", arguments => Unpack(Compile(Format(arguments, "unpack")), arguments, 1));
         module.Add("unpack_from", (arguments, keywords) =>
             UnpackFrom(Compile(Format(arguments, "unpack_from")), arguments, keywords, 1));
@@ -67,6 +101,7 @@ public static class StructModule
     private static byte[] Buffer(PyObject value) => value switch
     {
         PyBytes bytes => bytes.Value,
+        PyByteArray array => [.. array.Value],
         _ => throw new PyRaise(PyErrors.TypeError($"a bytes-like object is required, not '{value.TypeName}'")),
     };
 

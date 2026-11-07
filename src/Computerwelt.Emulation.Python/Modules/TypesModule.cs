@@ -158,6 +158,10 @@ public sealed class PySimpleNamespace : PyObject, IPyHostTyped
         _attributes[name] = value;
         return true;
     }
+
+    /// <inheritdoc />
+    public override bool DeleteAttribute(string name) =>
+        _attributes.Remove(name) ? true : throw new PyRaise(PyErrors.AttributeError(TypeName, name));
 }
 
 /// <summary>A <c>types.MappingProxyType</c>: a read-only view of a mapping.</summary>

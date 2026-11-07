@@ -306,6 +306,24 @@ public static class DataclassesModule
 
         var fields = new List<Field>();
 
+        // Frozen-ness has to agree with every dataclass base, as CPython insists.
+        var dataclassBases = type.Mro.Skip(1).Where(static b => FieldTable.TryGetValue(b, out _)).ToList();
+
+        if (dataclassBases.Count > 0)
+        {
+            var frozenBases = dataclassBases.Count(static b => b.Lookup("__dataclass_frozen__")?.IsTruthy() == true);
+
+            if (frozenBases > 0 && !options.Frozen)
+            {
+                throw new PyRaise(PyErrors.TypeError("cannot inherit non-frozen dataclass from a frozen one"));
+            }
+
+            if (frozenBases < dataclassBases.Count && options.Frozen)
+            {
+                throw new PyRaise(PyErrors.TypeError("cannot inherit frozen dataclass from a non-frozen one"));
+            }
+        }
+
         // Inherited fields first, in base-to-derived order, each base's list once.
         for (var i = type.Mro.Count - 1; i >= 1; i--)
         {

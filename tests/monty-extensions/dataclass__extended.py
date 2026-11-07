@@ -18,7 +18,7 @@ try:
     P(1).x = 3; assert False
 except FrozenInstanceError as e:
     assert str(e) == "cannot assign to field 'x'"
-@dataclass
+@dataclass(frozen=True)
 class P3(P):
     z: int = 9
 assert repr(P3(1, 2)) == 'P3(x=1, y=2, z=9)'
@@ -30,3 +30,11 @@ bx = Box([P(1)])
 assert bx.n == 1 and asdict(bx) == {'items': [{'x': 1, 'y': 0}]} and astuple(P(1, 2)) == (1, 2)
 assert replace(P(1, 2), y=5) == P(1, 5) and [f.name for f in fields(P3)] == ['x', 'y', 'z']
 assert P.__match_args__ == ('x', 'y')
+try:
+    @dataclass
+    class Thawed(P):
+        w: int = 0
+except TypeError as e:
+    assert str(e) == 'cannot inherit non-frozen dataclass from a frozen one'
+else:
+    assert False
