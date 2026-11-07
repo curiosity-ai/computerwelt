@@ -107,6 +107,31 @@ public sealed class PythonRunner
     /// <summary>Runs <paramref name="source"/> and reports what happened.</summary>
     public RunResult Run(string source, string fileName = "<stdin>")
     {
+        var machine = CreateMachine(fileName);
+
+        try
+        {
+            return Execute(machine, machine.Globals, source, fileName);
+        }
+        finally
+        {
+            // Whatever happened — a clean end, an uncaught exception, a limit reached — the
+            // libraries this run built get told it is over, so anything they are holding on
+            // the program's behalf is handed back. The result is already built by here, so
+            // nothing a callback does can change what the run reported.
+            machine.CompleteRun();
+        }
+    }
+
+    /// <summary>
+    /// Opens a session: one machine and one namespace that successive runs — the cells of a
+    /// notebook — share, configured from this runner.
+    /// </summary>
+    public PythonSession StartSession() => new(CreateMachine("<cell>"));
+
+    /// <summary>Builds a machine configured from this runner, its namespace ready to run in.</summary>
+    internal VirtualMachine CreateMachine(string fileName)
+    {
         var globals = new PyDict();
         var builtins = new PyDict();
 
@@ -179,22 +204,11 @@ public sealed class PythonRunner
         globals.Set(new PyStr("__name__"), new PyStr("__main__"));
         globals.Set(new PyStr("__file__"), new PyStr(fileName));
 
-        try
-        {
-            return Execute(machine, globals, source, fileName);
-        }
-        finally
-        {
-            // Whatever happened — a clean end, an uncaught exception, a limit reached — the
-            // libraries this run built get told it is over, so anything they are holding on
-            // the program's behalf is handed back. The result is already built by here, so
-            // nothing a callback does can change what the run reported.
-            machine.CompleteRun();
-        }
+        return machine;
     }
 
     /// <summary>Compiles and runs the program, turning however it ended into a result.</summary>
-    private static RunResult Execute(VirtualMachine machine, PyDict globals, string source, string fileName)
+    internal static RunResult Execute(VirtualMachine machine, PyDict globals, string source, string fileName)
     {
         try
         {

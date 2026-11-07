@@ -141,6 +141,54 @@ public sealed class VirtualMachine
         _completions.Clear();
     }
 
+    /// <summary>
+    /// Stops the program from outside: once cancelled, the next instruction boundary (checked
+    /// every 1024 instructions) throws <see cref="OperationCanceledException"/> out of the
+    /// machine. It is a host exception on purpose — no <c>except</c> in the program can
+    /// catch it, so an interrupt always interrupts.
+    /// </summary>
+    public CancellationToken Cancellation { get; set; }
+
+    private void CheckCancellation()
+    {
+        if ((_instructionCount & 0x3FF) == 0 && Cancellation.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(Cancellation);
+        }
+    }
+
+    /// <summary>
+    /// Readies a long-lived machine for its next unit of work — a notebook cell: the
+    /// instruction budget, the call depth and the captured output start again, while
+    /// globals, imported modules and everything the program built stay.
+    /// </summary>
+    public void ResetForNextRun()
+    {
+        _instructionCount = 0;
+        _depth = 0;
+        _stdout.Clear();
+        _stderr.Clear();
+        CallStack.Clear();
+    }
+
+    /// <summary>Characters written to standard output so far in this run.</summary>
+    internal int StdoutLength => _stdout.Length;
+
+    /// <summary>Characters written to standard error so far in this run.</summary>
+    internal int StderrLength => _stderr.Length;
+
+    /// <summary>Reads captured standard output from <paramref name="start"/> on.</summary>
+    internal string StdoutFrom(int start) => _stdout.ToString(start, _stdout.Length - start);
+
+    /// <summary>Reads captured standard error from <paramref name="start"/> on.</summary>
+    internal string StderrFrom(int start) => _stderr.ToString(start, _stderr.Length - start);
+
+    /// <summary>
+    /// Where <c>display(obj)</c> sends what it is given, when the host has a place for rich
+    /// output (a notebook); null leaves <c>display</c> undefined.
+    /// </summary>
+    public Action<PyObject, IReadOnlyDictionary<string, string>?>? DisplayHook { get; set; }
+
     /// <summary>Frames currently executing, innermost last. Used to build tracebacks.</summary>
     internal List<Frame> CallStack { get; } = [];
 
@@ -943,6 +991,8 @@ public sealed class VirtualMachine
                 throw new PyRaise(PyErrors.RuntimeError("instruction limit exceeded"));
             }
 
+            CheckCancellation();
+
             try
             {
                 if (Step(frame, instruction, out _))
@@ -981,6 +1031,8 @@ public sealed class VirtualMachine
                 {
                     throw new PyRaise(PyErrors.RuntimeError("instruction limit exceeded"));
                 }
+
+                CheckCancellation();
 
                 var instruction = frame.Code.Instructions[frame.InstructionPointer++];
                 frame.CurrentLine = instruction.Line;
