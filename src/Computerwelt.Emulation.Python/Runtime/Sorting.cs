@@ -108,7 +108,7 @@ public static class Sorting
 
     private static bool Less(PyObject right, PyObject left)
     {
-        if (right.PyCompare(left) is { } order)
+        if (HostNumbers.Compare(right, left) is { } order)
         {
             return order < 0;
         }

@@ -20,7 +20,8 @@ namespace Computerwelt.AgentTests;
 /// </para>
 /// <para>
 /// Several entries in <see cref="Available"/> are extensions rather than ports —
-/// <c>glob</c>, <c>fnmatch</c> and <c>io</c> do not exist upstream at all. What each one
+/// <c>glob</c>, <c>fnmatch</c>, <c>io</c>, <c>numpy</c> and <c>pandas</c> do not exist upstream
+/// at all; numpy and pandas are managed subsets built on first import. What each one
 /// promises is pinned by a fixture in <c>tests/monty-extensions/</c>.
 /// </para>
 /// </remarks>
@@ -30,45 +31,71 @@ public sealed class StandardLibrarySurfaceTests
     public static readonly string[] Available =
     [
         "__future__",
+        "abc",
         "asyncio",
         "base64",
         "binascii",
         "bisect",
+        "cmath",
+        "calendar",
         "collections",
+        "collections.abc",
         "contextlib",
         "copy",
         "csv",
         "dataclasses",
         "datetime",
+        "enum",
+        "decimal",
+        "difflib",
         "fnmatch",
+        "fractions",
         "functools",
         "gc",
         "glob",
+        "gzip",
         "hashlib",
         "heapq",
         "hmac",
+        "html",
         "io",
         "itertools",
         "json",
         "json.decoder",
         "json.encoder",
+        "logging",
         "math",
+        "numpy",
+        "numpy.linalg",
+        "numpy.random",
         "operator",
         "os",
         "os.path",
+        "pandas",
         "pathlib",
         "posixpath",
+        "pprint",
         "random",
         "re",
+        "secrets",
         "shlex",
         "statistics",
         "string",
+        "struct",
         "sys",
         "textwrap",
         "time",
+        "traceback",
+        "types",
         "typing",
         "unicodedata",
+        "urllib",
+        "urllib.parse",
         "uuid",
+        "warnings",
+        "zipfile",
+        "zlib",
+        "zoneinfo",
     ];
 
     /// <summary>
@@ -82,9 +109,8 @@ public sealed class StandardLibrarySurfaceTests
     public static readonly string[] Absent =
     [
         "argparse",
-        "difflib",
         "shutil",
-        "struct",
+        "sqlite3",
         "tempfile",
     ];
 

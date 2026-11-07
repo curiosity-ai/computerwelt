@@ -65,6 +65,56 @@ public enum OpCode
     /// <summary>Pop a value and an object; set the object's attribute.</summary>
     StoreAttr,
 
+    /// <summary>
+    /// Pop a module and bind its public names in the module namespace
+    /// (<c>from m import *</c>).
+    /// </summary>
+    ImportStar,
+
+    /// <summary>
+    /// Pattern matching: push whether the value on top of the stack (left in place) is a
+    /// sequence of the right length. Operand: <c>count &lt;&lt; 1 | hasStar</c>.
+    /// </summary>
+    MatchSequenceCheck,
+
+    /// <summary>Pattern matching: push whether the value on top of the stack (left in place) is a mapping.</summary>
+    MatchMappingCheck,
+
+    /// <summary>Pattern matching: pop a key tuple and a mapping; push the values, or None if a key is missing.</summary>
+    MatchKeys,
+
+    /// <summary>Pattern matching: pop a key tuple and a mapping; push a dict of the other entries.</summary>
+    DictWithoutKeys,
+
+    /// <summary>
+    /// Pattern matching: pop keyword names, a class and a subject; push the attribute tuple
+    /// (positional then keyword), or None when the subject does not match. Operand: the
+    /// positional count.
+    /// </summary>
+    MatchClass,
+
+    /// <summary>
+    /// <c>obj.name</c> about to be called: pushes the function and the receiver when
+    /// <c>name</c> is a plain method of the instance's class (so no bound method is made),
+    /// otherwise the attribute and a marker.
+    /// </summary>
+    LoadMethod,
+
+    /// <summary>
+    /// Calls what <see cref="LoadMethod"/> pushed, with the operand's count of positional
+    /// arguments above it.
+    /// </summary>
+    CallMethod,
+
+    /// <summary>Pop an object; delete the attribute named by the operand (<c>del obj.x</c>).</summary>
+    DeleteAttr,
+
+    /// <summary>
+    /// Push the class a method was defined in — the implicit <c>__class__</c> cell that
+    /// zero-argument <c>super()</c> reads.
+    /// </summary>
+    LoadClassCell,
+
     /// <summary>Pop an index and an object; push the indexed value.</summary>
     LoadSubscript,
 
@@ -192,7 +242,10 @@ public enum OpCode
     /// <summary>Build a function from the code object named by the operand.</summary>
     MakeFunction,
 
-    /// <summary>Build a class from a name and a body function.</summary>
+    /// <summary>
+    /// Build a class. Pops the body function, the keyword map, the base tuple and the
+    /// name, in that order.
+    /// </summary>
     MakeClass,
 
     /// <summary>Raise; the operand says how many values were supplied.</summary>

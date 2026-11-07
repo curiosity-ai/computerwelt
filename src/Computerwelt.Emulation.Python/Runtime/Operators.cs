@@ -33,6 +33,28 @@ public static class Operators
             ["@"] = ("__matmul__", "__rmatmul__"),
         };
 
+    /// <summary>
+    /// The operator an augmented assignment applies — <c>+</c> for <c>+=</c> — as an interned
+    /// literal rather than a substring, which would be a string allocated per execution.
+    /// </summary>
+    private static string PlainOperator(string augmented) => augmented switch
+    {
+        "+=" => "+",
+        "-=" => "-",
+        "*=" => "*",
+        "/=" => "/",
+        "//=" => "//",
+        "%=" => "%",
+        "**=" => "**",
+        "&=" => "&",
+        "|=" => "|",
+        "^=" => "^",
+        "<<=" => "<<",
+        ">>=" => ">>",
+        "@=" => "@",
+        _ => augmented[..^1],
+    };
+
     /// <summary>Applies a binary operator.</summary>
     public static PyObject Binary(string op, PyObject left, PyObject right)
     {
@@ -43,7 +65,7 @@ public static class Operators
             return Apply(op, left, right);
         }
 
-        var plain = op[..^1];
+        var plain = PlainOperator(op);
 
         if (InPlace(plain, left, right) is { } mutated)
         {
@@ -66,6 +88,27 @@ public static class Operators
 
     private static PyObject Apply(string op, PyObject left, PyObject right)
     {
+        if ((left is PyComplex || right is PyComplex) && PyComplex.Binary(op, left, right) is { } complex)
+        {
+            return complex;
+        }
+
+        // A bytearray concatenates with any bytes-like value and repeats like bytes; the
+        // result takes the left operand's type, as CPython's does.
+        if ((left is PyByteArray || right is PyByteArray) && op is "+" or "*" or "%")
+        {
+            if (op == "+" && left is PyByteArray or PyBytes && right is PyByteArray or PyBytes)
+            {
+                byte[] joined = [.. Raw(left), .. Raw(right)];
+                return left is PyByteArray ? new PyByteArray(joined) : new PyBytes(joined);
+            }
+
+            var result = Apply(op, PyByteArray.Unwrap(left), PyByteArray.Unwrap(right));
+            return left is PyByteArray || (op == "*" && right is PyByteArray) ? PyByteArray.Rewrap(result) : result;
+
+            static IEnumerable<byte> Raw(PyObject value) => value is PyByteArray a ? a.Value : ((PyBytes)value).Value;
+        }
+
         // Two plain integers, which is most of the arithmetic a program does. Answering
         // here skips the container, instance and datetime questions below — none of which
         // an integer can answer yes to — and the numeric helpers' widening to double.
@@ -74,6 +117,18 @@ public static class Operators
             && Integers(op, ((PyInt)left).Value, ((PyInt)right).Value) is { } answer)
         {
             return answer;
+        }
+
+        // A host type with operators of its own (numpy's ndarray) answers before any of the
+        // built-in rules, on either side — see IPyOperand.
+        if (left is IPyOperand forwardOperand && forwardOperand.Binary(op, right, reflected: false) is { } forwardResult)
+        {
+            return forwardResult;
+        }
+
+        if (right is IPyOperand reflectedOperand && reflectedOperand.Binary(op, left, reflected: true) is { } reflectedResult)
+        {
+            return reflectedResult;
         }
 
         if (left is PyDeque deque)
@@ -102,6 +157,12 @@ public static class Operators
             return PyCounter.Combine(counter, counts, op);
         }
 
+
+        // A module's number type (Decimal, Fraction) answers for itself, on either side.
+        if ((left is IPyNumber || right is IPyNumber) && HostNumbers.Binary(op, left, right) is { } number)
+        {
+            return number;
+        }
 
         // A user class defines an operator by its dunder; the reflected form is tried when
         // the left operand does not implement the forward one.
@@ -155,7 +216,9 @@ public static class Operators
 
     /// <summary>Applies a unary operator.</summary>
     public static PyObject Unary(string op, PyObject operand) =>
-        Modules.DatetimeModule.TryUnary(op, operand) ?? Apply(op, operand);
+        (op != "not" && operand is IPyOperand own ? own.Unary(op) : null)
+        ?? PyComplex.Unary(op, operand) ?? Modules.DatetimeModule.TryUnary(op, operand)
+        ?? (operand as IPyNumber)?.Unary(op) ?? Apply(op, operand);
 
     private static PyObject Apply(string op, PyObject operand) => op switch
     {
@@ -197,7 +260,8 @@ public static class Operators
     };
 
     /// <summary>Applies a comparison.</summary>
-    public static PyObject Compare(string op, PyObject left, PyObject right) => op switch
+    public static PyObject Compare(string op, PyObject left, PyObject right) =>
+        CompareOperand(op, left, right) ?? op switch
     {
         "==" => Equality(left, right, negate: false),
         "!=" => Equality(left, right, negate: true),
@@ -210,9 +274,45 @@ public static class Operators
         "<" or "<=" or ">" or ">=" when left is PyCounter counter && right is PyCounter counts =>
             PyBool.Of(PyCounter.Compare(counter, counts, op)),
 
+        // Sets order by inclusion: `a <= b` is "a is a subset of b".
+        "<" or "<=" or ">" or ">=" when left is PySet a && right is PySet b => PyBool.Of(SetOrder(op, a, b)),
+
         "<" or "<=" or ">" or ">=" => Ordering(op, left, right),
         _ => throw new PyRaise(PyErrors.TypeError($"unsupported comparison {op}")),
     };
+
+    private static bool SetOrder(string op, PySet left, PySet right)
+    {
+        bool Subset(PySet small, PySet large) => small.Count <= large.Count && small.Items.All(large.Contains);
+
+        return op switch
+        {
+            "<=" => Subset(left, right),
+            "<" => left.Count < right.Count && Subset(left, right),
+            ">=" => Subset(right, left),
+            _ => right.Count < left.Count && Subset(right, left),
+        };
+    }
+
+    /// <summary>
+    /// A rich comparison answered by an <see cref="IPyOperand"/> on either side, with the
+    /// operator mirrored when the operand is on the right — or null when neither answers.
+    /// </summary>
+    private static PyObject? CompareOperand(string op, PyObject left, PyObject right)
+    {
+        if (op is not ("==" or "!=" or "<" or "<=" or ">" or ">="))
+        {
+            return null;
+        }
+
+        if (left is IPyOperand forward && forward.Compare(op, right) is { } answer)
+        {
+            return answer;
+        }
+
+        var mirrored = op switch { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", _ => op };
+        return right is IPyOperand reflected ? reflected.Compare(mirrored, left) : null;
+    }
 
     /// <summary>
     /// Applies <c>==</c> or <c>!=</c>.
@@ -258,7 +358,18 @@ public static class Operators
             }
         }
 
-        return left is PyInstance || right is PyInstance ? null : PyBool.Of(left.PyEquals(right));
+        if (left is PyInstance || right is PyInstance)
+        {
+            return null;
+        }
+
+        // A complex compares equal to the real number it holds, from either side.
+        if (right is PyComplex && left is not PyComplex)
+        {
+            return PyBool.Of(right.PyEquals(left));
+        }
+
+        return PyBool.Of(HostNumbers.Equal(left, right));
     }
 
     /// <summary>
@@ -304,7 +415,7 @@ public static class Operators
 
         try
         {
-            order = left.PyCompare(right);
+            order = HostNumbers.Compare(left, right);
         }
         catch (PyList.UnorderedPair pair)
         {
@@ -315,7 +426,7 @@ public static class Operators
         {
             // A NaN answers False to every comparison against another number; against a
             // non-number it is still a type mismatch, and says so.
-            return (IsNaN(a) && b is PyInt or PyFloat) || (IsNaN(b) && a is PyInt or PyFloat)
+            return (IsNaN(a) && b is PyInt or PyFloat or IPyNumber) || (IsNaN(b) && a is PyInt or PyFloat or IPyNumber)
                 ? PyBool.False
                 : throw new PyRaise(PyErrors.TypeError(
                     $"'{op}' not supported between instances of '{a.TypeName}' and '{b.TypeName}'"));
@@ -707,8 +818,40 @@ public static class Operators
     /// The identity matters: <c>a = b; a += [1]</c> must leave <c>b</c> holding the longer
     /// list, which rebinding a fresh one would not.
     /// </remarks>
+    /// <summary>
+    /// The in-place set operators. Kept out of <see cref="InPlace"/> because its lambdas
+    /// capture the two sets, and a captured variable makes the compiler allocate its closure
+    /// at the top of the method — on every augmented assignment, set or not.
+    /// </summary>
+    private static PySet UpdateSet(string op, PySet set, PySet other)
+    {
+        var items = op switch
+        {
+            "|" => set.Items.Concat(other.Items),
+            "&" => set.Items.Where(other.Contains),
+            "-" => set.Items.Where(item => !other.Contains(item)),
+            _ => set.Items.Where(item => !other.Contains(item))
+                .Concat(other.Items.Where(item => !set.Contains(item))),
+        };
+
+        var replacement = items.ToList();
+        set.Clear();
+
+        foreach (var item in replacement)
+        {
+            set.Add(item);
+        }
+
+        return set;
+    }
+
     private static PyObject? InPlace(string op, PyObject left, PyObject right)
     {
+        if (left is IPyOperand operand && operand.InPlace(op, right) is { } updated)
+        {
+            return updated;
+        }
+
         if (left is PyInstance instance
             && InPlaceDunders.TryGetValue(op, out var dunder)
             && instance.Dunder(dunder) is { } method)
@@ -728,6 +871,15 @@ public static class Operators
             {
                 return PyDeque.RepeatInPlace(target, right);
             }
+        }
+
+        // A bytearray grows and repeats in place.
+        if (left is PyByteArray array && op is "+" or "*")
+        {
+            var grown = (PyByteArray)Apply(op, array, right);
+            array.Value.Clear();
+            array.Value.AddRange(grown.Value);
+            return array;
         }
 
         // A Counter's in-place operators mutate it, unlike the binary forms, and accept
@@ -762,26 +914,7 @@ public static class Operators
             }
 
             case ("|" or "&" or "-" or "^", PySet { IsFrozen: false } set) when AsSet(right) is { } other:
-            {
-                var items = op switch
-                {
-                    "|" => set.Items.Concat(other.Items),
-                    "&" => set.Items.Where(other.Contains),
-                    "-" => set.Items.Where(item => !other.Contains(item)),
-                    _ => set.Items.Where(item => !other.Contains(item))
-                        .Concat(other.Items.Where(item => !set.Contains(item))),
-                };
-
-                var replacement = items.ToList();
-                set.Clear();
-
-                foreach (var item in replacement)
-                {
-                    set.Add(item);
-                }
-
-                return set;
-            }
+                return UpdateSet(op, set, other);
 
             case ("|", PyDict dict) when right is PyDict source:
                 foreach (var (key, value) in source.Entries)

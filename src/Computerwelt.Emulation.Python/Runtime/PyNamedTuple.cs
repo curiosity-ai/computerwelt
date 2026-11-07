@@ -81,8 +81,19 @@ public sealed class PyNamedTupleType : PyCallable
         "_fields" when !IsStructSeq => new PyTuple([.. Fields.Select(static f => new PyStr(f))]),
         "_field_defaults" when !IsStructSeq => FieldDefaults,
         "_make" when !IsStructSeq => new PyBuiltinFunction("_make", arguments => Make(arguments)),
-        _ => null,
+        _ => Methods.TryGetValue(name, out var method) ? method switch
+        {
+            PyClassMethod classMethod => ClassModel.BindCallable(classMethod.Function, this),
+            PyStaticMethod staticMethod => staticMethod.Function,
+            _ => method,
+        } : null,
     };
+
+    /// <summary>
+    /// Methods and class attributes a <c>class P(NamedTuple)</c> body defines, which its
+    /// instances reach as they would a class's.
+    /// </summary>
+    public Dictionary<string, PyObject> Methods { get; } = new(StringComparer.Ordinal);
 
     /// <summary>Builds an instance from an iterable of values.</summary>
     public PyObject Make(PyObject[] arguments)
@@ -282,6 +293,17 @@ public sealed class PyNamedTuple : PyTuple
         if (index >= 0)
         {
             return Items[index];
+        }
+
+        if (Type.Methods.TryGetValue(name, out var method))
+        {
+            return method switch
+            {
+                PyFunction function => function.Bind(this),
+                PyClassMethod classMethod => ClassModel.BindCallable(classMethod.Function, Type),
+                PyStaticMethod staticMethod => staticMethod.Function,
+                _ => method,
+            };
         }
 
         // A structseq's `__new__` takes one sequence, so its `__getnewargs__` wraps the

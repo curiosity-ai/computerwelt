@@ -59,6 +59,12 @@ public abstract class PyObject
     /// <summary>Attribute assignment. Returns false when the type does not permit it.</summary>
     public virtual bool SetAttribute(string name, PyObject value) => false;
 
+    /// <summary>
+    /// Attribute deletion (<c>del obj.x</c>). Returns false when the type does not permit
+    /// it; raises <c>AttributeError</c> itself when the attribute is simply absent.
+    /// </summary>
+    public virtual bool DeleteAttribute(string name) => false;
+
     /// <summary>Element count, for <c>len()</c>. Returns null when the type has no length.</summary>
     public virtual int? Length() => null;
 

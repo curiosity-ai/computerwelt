@@ -18,6 +18,7 @@ public static class BuiltinMethods
         PyView view => BindView(view, name),
         PyTuple => BindTuple(target, name),
         PyBytes => BindBytes(target, name),
+        PyByteArray array => BindByteArray(array, name),
         PyInt => BindInt(target, name),
         PyFloat => BindFloat(target, name),
         _ => null,
@@ -60,28 +61,28 @@ public static class BuiltinMethods
         int minimum,
         int maximum,
         Func<PyObject, PyObject[], PyDict?, PyObject> implementation) =>
-        new(name, receiver, (self, arguments, keywords) =>
-        {
-            if (arguments.Length < minimum || arguments.Length > maximum)
-            {
-                // Three wordings, and which one a method uses is not a matter of taste: a
-                // fixed-arity method of a sequence type names its type and says "exactly";
-                // one with a range of arities uses the argument clinic's "at least"; every
-                // other method uses the older "expected" form. Scripts match on all three.
-                throw new PyRaise(PyErrors.TypeError(
-                    self is PyList or PyTuple or PyStr or PySet && minimum == maximum
-                        ? $"{self.TypeName}.{name}() takes exactly {(minimum == 1 ? "one argument" : minimum + " arguments")} ({arguments.Length} given)"
-                        : self is PyStr
-                            ? arguments.Length < minimum
-                                ? $"{name}() takes at least {minimum} positional argument{(minimum == 1 ? string.Empty : "s")} ({arguments.Length} given)"
-                                : $"{name}() takes at most {maximum} argument{(maximum == 1 ? string.Empty : "s")} ({arguments.Length} given)"
-                            : arguments.Length < minimum
-                                ? $"{name} expected at least {minimum} argument{(minimum == 1 ? string.Empty : "s")}, got {arguments.Length}"
-                                : $"{name} expected at most {maximum} argument{(maximum == 1 ? string.Empty : "s")}, got {arguments.Length}"));
-            }
+        // The arity travels with the bound method and is checked when it is called, so binding
+        // a method — which happens on every `s.split(...)` — makes no closure of its own.
+        new(name, receiver, implementation) { Minimum = minimum, Maximum = maximum };
 
-            return implementation(self, arguments, keywords);
-        });
+    /// <summary>The <c>TypeError</c> for a builtin method called with the wrong number of arguments.</summary>
+    /// <remarks>
+    /// Three wordings, and which one a method uses is not a matter of taste: a fixed-arity
+    /// method of a sequence type names its type and says "exactly"; one with a range of
+    /// arities uses the argument clinic's "at least"; every other method uses the older
+    /// "expected" form. Scripts match on all three.
+    /// </remarks>
+    internal static PyException ArityError(string name, PyObject self, int count, int minimum, int maximum) =>
+        PyErrors.TypeError(
+            self is PyList or PyTuple or PyStr or PySet && minimum == maximum
+                ? $"{self.TypeName}.{name}() takes exactly {(minimum == 1 ? "one argument" : minimum + " arguments")} ({count} given)"
+                : self is PyStr
+                    ? count < minimum
+                        ? $"{name}() takes at least {minimum} positional argument{(minimum == 1 ? string.Empty : "s")} ({count} given)"
+                        : $"{name}() takes at most {maximum} argument{(maximum == 1 ? string.Empty : "s")} ({count} given)"
+                    : count < minimum
+                        ? $"{name} expected at least {minimum} argument{(minimum == 1 ? string.Empty : "s")}, got {count}"
+                        : $"{name} expected at most {maximum} argument{(maximum == 1 ? string.Empty : "s")}, got {count}");
 
     /// <summary>
     /// Rejects more arguments than a method takes, counting positional and keyword together.
@@ -453,7 +454,10 @@ public static class BuiltinMethods
                         return new PyStr(text.PadLeft(width, fill));
                     }
 
-                    var left = (width - text.Length) / 2;
+                    // CPython's `pad // 2 + (pad & width & 1)`: an odd pad in an odd width
+                    // puts the extra fill on the left, which is what `calendar` lays out by.
+                    var pad = width - text.Length;
+                    var left = (pad / 2) + (pad & width & 1);
                     return new PyStr(new string(fill, left) + text + new string(fill, width - text.Length - left));
                 });
 
@@ -1253,6 +1257,97 @@ public static class BuiltinMethods
 
         _ => null,
     };
+
+    /// <summary>
+    /// A bytearray's methods: its own mutators, and every method of <c>bytes</c> run over a
+    /// snapshot, with bytes results handed back as bytearrays.
+    /// </summary>
+    private static PyObject? BindByteArray(PyByteArray receiver, string name)
+    {
+        switch (name)
+        {
+            case "append":
+                return Method(name, receiver, 1, 1, static (self, arguments, _) =>
+                {
+                    ((PyByteArray)self).Value.Add(PyByteArray.Byte(arguments[0]));
+                    return PyNone.Instance;
+                });
+
+            case "extend":
+                return Method(name, receiver, 1, 1, static (self, arguments, _) =>
+                {
+                    var extra = PyByteArray.Bytes(arguments[0], $"can't extend bytearray with {arguments[0].TypeName}");
+                    ((PyByteArray)self).Value.AddRange(extra);
+                    return PyNone.Instance;
+                });
+
+            case "insert":
+                return Method(name, receiver, 2, 2, static (self, arguments, _) =>
+                {
+                    var value = ((PyByteArray)self).Value;
+                    var index = (int)System.Numerics.BigInteger.Clamp(((PyInt)PyByteArray.Index(arguments[0])).Value, -value.Count, value.Count);
+                    value.Insert(index < 0 ? index + value.Count : index, PyByteArray.Byte(arguments[1]));
+                    return PyNone.Instance;
+                });
+
+            case "pop":
+                return Method(name, receiver, 0, 1, static (self, arguments, _) =>
+                {
+                    var value = ((PyByteArray)self).Value;
+
+                    if (value.Count == 0)
+                    {
+                        throw new PyRaise(PyErrors.IndexError("pop from empty bytearray"));
+                    }
+
+                    var index = arguments.Length == 0 ? value.Count - 1 : (int)System.Numerics.BigInteger.Clamp(((PyInt)PyByteArray.Index(arguments[0])).Value, int.MinValue / 2, int.MaxValue / 2);
+                    index = index < 0 ? index + value.Count : index;
+
+                    if (index < 0 || index >= value.Count)
+                    {
+                        throw new PyRaise(PyErrors.IndexError("pop index out of range"));
+                    }
+
+                    var popped = value[index];
+                    value.RemoveAt(index);
+                    return PyInt.From(popped);
+                });
+
+            case "remove":
+                return Method(name, receiver, 1, 1, static (self, arguments, _) =>
+                    ((PyByteArray)self).Value.Remove(PyByteArray.Byte(arguments[0]))
+                        ? PyNone.Instance
+                        : throw new PyRaise(PyErrors.ValueError("value not found in bytearray")));
+
+            case "clear":
+                return Method(name, receiver, 0, 0, static (self, _, _) =>
+                {
+                    ((PyByteArray)self).Value.Clear();
+                    return PyNone.Instance;
+                });
+
+            case "reverse":
+                return Method(name, receiver, 0, 0, static (self, _, _) =>
+                {
+                    ((PyByteArray)self).Value.Reverse();
+                    return PyNone.Instance;
+                });
+
+            case "copy":
+                return Method(name, receiver, 0, 0, static (self, _, _) => new PyByteArray(((PyByteArray)self).Value));
+        }
+
+        if (BindBytes(receiver.Snapshot(), name) is null)
+        {
+            return null;
+        }
+
+        return new PyBoundMethod(name, receiver, (self, arguments, keywords) =>
+        {
+            var method = (PyBoundMethod)BindBytes(((PyByteArray)self).Snapshot(), name)!;
+            return PyByteArray.Rewrap(method.Invoke([.. arguments.Select(PyByteArray.Unwrap)], keywords));
+        });
+    }
 
     private static PyObject? BindBytes(PyObject receiver, string name)
     {

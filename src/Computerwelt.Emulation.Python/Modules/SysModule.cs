@@ -74,6 +74,13 @@ public static class SysModule
 
         module.Add("intern", static arguments => arguments[0]);
 
+        // The exception being handled, as `except` sees it — the classic triple and its
+        // 3.11 single-value form.
+        module.Add("exc_info", _ => TracebackModule.Handled(machine) is { } handled
+            ? new PyTuple([TypeRegistry.Of(handled), handled, PyNone.Instance])
+            : new PyTuple([PyNone.Instance, PyNone.Instance, PyNone.Instance]));
+        module.Add("exception", _ => (PyObject?)TracebackModule.Handled(machine) ?? PyNone.Instance);
+
         return module;
     }
 

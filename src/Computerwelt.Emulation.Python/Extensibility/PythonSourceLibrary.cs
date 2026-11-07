@@ -94,5 +94,8 @@ internal sealed class PySourceModule : PyObject
     public override string Repr() => $"<module '{Name}'>";
 
     public override PyObject? GetAttribute(string name) =>
-        _globals.TryGetValue(new PyStr(name), out var value) ? value : null;
+        name == "__dict__" ? _globals : _globals.TryGetValue(new PyStr(name), out var value) ? value : null;
+
+    /// <summary>The names the module defines, as <c>dir()</c> and <c>import *</c> see them.</summary>
+    public IEnumerable<string> AttributeNames => _globals.Entries.Select(static e => e.Key.Display());
 }

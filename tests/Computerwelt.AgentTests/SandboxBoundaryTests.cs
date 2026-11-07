@@ -16,9 +16,12 @@ public sealed class SandboxBoundaryTests
     [
         "subprocess",
         "socket",
-        "urllib",
         "urllib.request",
+        "urllib.error",
+        "urllib.response",
+        "urllib.robotparser",
         "http",
+        "http.client",
         "ctypes",
         "pickle",
         "importlib",
@@ -44,6 +47,26 @@ public sealed class SandboxBoundaryTests
     }
 
     [Fact]
+    public async Task The_urllib_package_holds_parsing_and_nothing_that_fetches()
+    {
+        var session = await AgentSession.NewAsync();
+
+        // `import urllib.parse` binds `urllib`, so the package itself is importable — but it
+        // is string manipulation only: no submodule that opens a connection is reachable,
+        // whether imported or looked up as an attribute.
+        var output = await session.OutAsync("""
+            python3 - <<'PY'
+            import urllib
+            import urllib.parse
+            print(urllib.parse.quote('a b'))
+            print([n for n in ('request', 'error', 'response', 'robotparser') if getattr(urllib, n, None) is not None])
+            PY
+            """);
+
+        Assert.Equal("a%20b\n[]\n", output);
+    }
+
+    [Fact]
     public async Task There_is_no_way_to_start_a_process_from_python()
     {
         var session = await AgentSession.NewAsync();
@@ -63,17 +86,39 @@ public sealed class SandboxBoundaryTests
     }
 
     [Fact]
-    public async Task Eval_and_exec_are_not_available_to_build_code_at_runtime()
+    public async Task Code_built_at_runtime_reaches_nothing_the_program_could_not()
     {
         var session = await AgentSession.NewAsync();
 
-        foreach (var attempt in new[] { "eval('1+1')", "exec('x=1')", "compile('1', '<s>', 'eval')", "__import__('os')" })
-        {
-            var result = await session.RunAsync($"python3 -c \"{attempt}\"");
+        // `eval`, `exec` and `compile` exist — a notebook needs them — but they compile with
+        // the same compiler and run on the same machine, so the importable set and the
+        // builtins are exactly the program's own. `__import__` stays absent: it is the one
+        // spelling of import that takes a computed name.
+        var result = await session.RunAsync("python3 -c \"__import__('os')\"");
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("NameError", result.Stderr.ToString(), StringComparison.Ordinal);
 
-            Assert.NotEqual(0, result.ExitCode);
-            Assert.Contains("NameError", result.Stderr.ToString(), StringComparison.Ordinal);
-        }
+        result = await session.RunAsync("python3 -c \"exec('import subprocess')\"");
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("ModuleNotFoundError", result.Stderr.ToString(), StringComparison.Ordinal);
+
+        Assert.Equal("2\n", await session.OutAsync("python3 -c \"print(eval('1+1'))\""));
+    }
+
+    [Fact]
+    public async Task Source_that_executes_itself_hits_the_recursion_limit_not_the_host_stack()
+    {
+        var session = await AgentSession.NewAsync();
+
+        var result = await session.RunAsync("""
+            python3 - <<'PY'
+            s = "exec(s)"
+            exec(s)
+            PY
+            """);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("RecursionError", result.Stderr.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

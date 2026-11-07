@@ -141,6 +141,54 @@ public sealed class VirtualMachine
         _completions.Clear();
     }
 
+    /// <summary>
+    /// Stops the program from outside: once cancelled, the next instruction boundary (checked
+    /// every 1024 instructions) throws <see cref="OperationCanceledException"/> out of the
+    /// machine. It is a host exception on purpose — no <c>except</c> in the program can
+    /// catch it, so an interrupt always interrupts.
+    /// </summary>
+    public CancellationToken Cancellation { get; set; }
+
+    private void CheckCancellation()
+    {
+        if ((_instructionCount & 0x3FF) == 0 && Cancellation.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(Cancellation);
+        }
+    }
+
+    /// <summary>
+    /// Readies a long-lived machine for its next unit of work — a notebook cell: the
+    /// instruction budget, the call depth and the captured output start again, while
+    /// globals, imported modules and everything the program built stay.
+    /// </summary>
+    public void ResetForNextRun()
+    {
+        _instructionCount = 0;
+        _depth = 0;
+        _stdout.Clear();
+        _stderr.Clear();
+        CallStack.Clear();
+    }
+
+    /// <summary>Characters written to standard output so far in this run.</summary>
+    internal int StdoutLength => _stdout.Length;
+
+    /// <summary>Characters written to standard error so far in this run.</summary>
+    internal int StderrLength => _stderr.Length;
+
+    /// <summary>Reads captured standard output from <paramref name="start"/> on.</summary>
+    internal string StdoutFrom(int start) => _stdout.ToString(start, _stdout.Length - start);
+
+    /// <summary>Reads captured standard error from <paramref name="start"/> on.</summary>
+    internal string StderrFrom(int start) => _stderr.ToString(start, _stderr.Length - start);
+
+    /// <summary>
+    /// Where <c>display(obj)</c> sends what it is given, when the host has a place for rich
+    /// output (a notebook); null leaves <c>display</c> undefined.
+    /// </summary>
+    public Action<PyObject, IReadOnlyDictionary<string, string>?>? DisplayHook { get; set; }
+
     /// <summary>Frames currently executing, innermost last. Used to build tracebacks.</summary>
     internal List<Frame> CallStack { get; } = [];
 
@@ -166,8 +214,43 @@ public sealed class VirtualMachine
     {
         ArgumentNullException.ThrowIfNull(globals);
 
+        using var scope = Enter();
         var frame = new Frame(code, globals, [], null);
         return Execute(frame);
+    }
+
+    [ThreadStatic]
+    private static VirtualMachine? s_running;
+
+    /// <summary>
+    /// The machine running on this thread right now, or null between runs.
+    /// </summary>
+    /// <remarks>
+    /// For host types that hold no reference to the machine that made them but must call
+    /// back into it — a pandas Series applying a lambda. It is set for exactly the span of
+    /// a run (<see cref="RunModule(CodeObject, PyDict)"/>, and whatever a host wraps in
+    /// <see cref="Enter"/>), so a session whose cells run on different threads finds the
+    /// right machine in each, and a thread reused by another tenant never sees this one.
+    /// </remarks>
+    public static VirtualMachine? Running => s_running;
+
+    /// <summary>Makes this the running machine on this thread until the scope is disposed.</summary>
+    public RunningScope Enter()
+    {
+        var previous = s_running;
+        s_running = this;
+        return new RunningScope(previous);
+    }
+
+    /// <summary>Puts the previous running machine back when disposed; a struct, so entering costs nothing.</summary>
+    public readonly struct RunningScope : IDisposable
+    {
+        private readonly VirtualMachine? _previous;
+
+        internal RunningScope(VirtualMachine? previous) => _previous = previous;
+
+        /// <inheritdoc />
+        public void Dispose() => s_running = _previous;
     }
 
     /// <summary>
@@ -178,10 +261,29 @@ public sealed class VirtualMachine
     /// one run yields one object — module state a program mutates is seen by every importer
     /// of it, as in CPython — while a fresh run starts from a fresh module.
     /// </remarks>
+    /// <summary>What the standard modules of this run are built over, when they are built.</summary>
+    public Computerwelt.Emulation.Python.Modules.StandardLibraryContext? StandardLibrary { get; set; }
+
+    /// <summary>
+    /// The module <paramref name="name"/>, built if this run has not imported it yet — for
+    /// host code that needs a module (<c>json</c>, <c>re</c>) the program may never import.
+    /// </summary>
+    public PyObject Import(string name) =>
+        Modules.TryGetValue(name, out var module)
+            ? module
+            : ResolveModule(name) ?? throw new PyRaise(PyErrors.ModuleNotFound(name));
+
     private PyObject? ResolveModule(string name)
     {
         if (ModuleResolver is not { } resolver)
         {
+            // A machine built without a runner still has the standard library.
+            if (Computerwelt.Emulation.Python.Modules.StandardLibrary.CreateOnDemand(this, name) is { } standard)
+            {
+                Modules[name] = standard;
+                return standard;
+            }
+
             return null;
         }
 
@@ -228,7 +330,8 @@ public sealed class VirtualMachine
                 return builtinType.Construct(arguments, keywords);
 
             case PyClass type:
-                return Instantiate(type, arguments, keywords);
+                return type.Behaviour?.Call(this, type, arguments, keywords)
+                    ?? Instantiate(type, arguments, keywords);
 
             case PyNamedTupleType namedTuple:
                 return namedTuple.Instantiate(arguments, keywords);
@@ -240,22 +343,13 @@ public sealed class VirtualMachine
                 return factory(arguments);
 
             case PyExceptionType exceptionType:
-            {
-                // A KeyError shows its key's repr rather than its text, which is what makes
-                // `KeyError('x')` print as `'x'` and a missing key visible when it is blank.
-                var single = arguments.Length > 0 ? arguments[0] : null;
+                return exceptionType.Instantiate(arguments);
 
-                // With several arguments `str(e)` is the repr of the argument tuple.
-                var message = single is null
-                    ? string.Empty
-                    : arguments.Length > 1
-                        ? new PyTuple(arguments).Repr()
-                        : ReferenceEquals(exceptionType, PyExceptionType.KeyError)
-                            ? single.Repr()
-                            : single.Display();
+            case PyMethod method:
+                return Call(method.Function, [method.Self, .. arguments], keywords);
 
-                return new PyException(exceptionType, message, arguments);
-            }
+            case PyStaticMethod staticMethod:
+                return Call(staticMethod.Function, arguments, keywords);
 
             default:
                 return CallThroughDunder(callable, arguments, keywords);
@@ -323,16 +417,89 @@ public sealed class VirtualMachine
         throw new PyRaise(PyErrors.TypeError($"'{target.TypeName}' object is not callable"));
     }
 
-    private PyObject Instantiate(PyClass type, PyObject[] arguments, PyDict? keywords)
+    /// <summary>
+    /// Calls a class: <c>__new__</c> builds the instance, then <c>__init__</c> initializes
+    /// it when <c>__new__</c> returned one of this class's own instances.
+    /// </summary>
+    internal PyObject Instantiate(PyClass type, PyObject[] arguments, PyDict? keywords, bool runInit = true)
     {
-        var instance = new PyInstance(type, this);
+        // A class built by `type(name, bases, namespace)` learns its machine on first use.
+        type.Machine ??= this;
+        RefuseAbstract(type);
 
-        switch (type.GetAttribute("__init__"))
+        PyObject instance;
+        var initializer = type.Lookup("__init__");
+
+        if (type.LookupWithOwner("__new__") is { } custom)
+        {
+            // `__new__` is a static method whether or not it was declared one.
+            var constructor = custom.Value is PyStaticMethod declared ? declared.Function : custom.Value;
+            instance = Call(constructor, [type, .. arguments], keywords);
+
+            var ours = instance switch
+            {
+                PyInstance created => created.Class.IsSubclassOf(type),
+                PyException { UserClass: { } owner } => owner.IsSubclassOf(type),
+                _ => false,
+            };
+
+            if (!ours || !runInit)
+            {
+                return instance;
+            }
+        }
+        else if (type.ExceptionType is { } exceptionType)
+        {
+            // An exception's arguments are its `args` before any `__init__` runs, as
+            // `BaseException.__new__` arranges — which is why a subclass that never calls
+            // `super().__init__` still has them.
+            var template = exceptionType.NearestBuiltin().Instantiate(
+                initializer is null && keywords is not { Count: > 0 } ? arguments : arguments);
+
+            instance = new PyException(exceptionType, template.Message, template.Arguments)
+            {
+                UserClass = type,
+                Fields = template.Fields is null ? null : new(template.Fields, StringComparer.Ordinal),
+            };
+
+            if (initializer is null)
+            {
+                if (keywords is { Count: > 0 })
+                {
+                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no keyword arguments"));
+                }
+
+                return instance;
+            }
+        }
+        else
+        {
+            // Without a user `__init__`, a mutable built-in base takes the arguments
+            // itself, as `dict.__init__` would.
+            instance = ClassModel.CreateInstance(this, type, arguments, keywords, fillMutable: initializer is null);
+
+            if (initializer is null)
+            {
+                if ((arguments.Length > 0 || keywords is { Count: > 0 }) && type.BuiltinBase is null)
+                {
+                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no arguments"));
+                }
+
+                return instance;
+            }
+        }
+
+        if (!runInit)
+        {
+            return instance;
+        }
+
+        switch (initializer)
         {
             // An initializer produces the instance by mutating it, so returning anything is
             // a mistake worth reporting rather than quietly dropping.
-            case PyFunction initializer:
-                Initialized(CallFunction(initializer.Bind(instance), arguments, keywords));
+            case PyFunction function:
+                Initialized(CallWithReceiver(function, instance, arguments, keywords));
                 break;
 
             // A decorator such as `@dataclass` installs a builtin `__init__`, which is
@@ -344,12 +511,11 @@ public sealed class VirtualMachine
                     builtin.BindsAsMethod ? [instance, .. arguments] : arguments, keywords));
                 break;
 
-            case null:
-                if (arguments.Length > 0 || keywords is { Count: > 0 })
-                {
-                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no arguments"));
-                }
+            case PyClassMethod or PyStaticMethod:
+                Initialized(Call(ClassModel.BindToInstance(this, initializer, instance, type), arguments, keywords));
+                break;
 
+            case null:
                 break;
 
             // Anything else in the slot — a class, a bound method, a non-callable — is
@@ -365,6 +531,54 @@ public sealed class VirtualMachine
         }
 
         return instance;
+    }
+
+    /// <summary>
+    /// Refuses to instantiate a class that still has abstract methods, as <c>abc.ABC</c>
+    /// classes do in CPython.
+    /// </summary>
+    private static void RefuseAbstract(PyClass type)
+    {
+        if (type.Lookup("__abstractmethods__") is not PyObject marker || marker is PyNone)
+        {
+            return;
+        }
+
+        var missing = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var owner in type.Mro)
+        {
+            foreach (var (key, _) in owner.Members.Entries)
+            {
+                var name = key.Display();
+
+                if (!seen.Add(name))
+                {
+                    continue;
+                }
+
+                if (type.Lookup(name) is { } member && IsAbstract(member))
+                {
+                    missing.Add(name);
+                }
+            }
+        }
+
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        missing.Sort(StringComparer.Ordinal);
+        var plural = missing.Count == 1 ? "method" : "methods";
+
+        throw new PyRaise(PyErrors.TypeError(
+            $"Can't instantiate abstract class {type.Name} without an implementation for abstract {plural} "
+            + string.Join(", ", missing.Select(static m => $"'{m}'"))));
+
+        static bool IsAbstract(PyObject member) =>
+            member.GetAttribute("__isabstractmethod__") is { } flag && flag.IsTruthy();
     }
 
     /// <summary>Rejects an <c>__init__</c> that returned anything but None.</summary>
@@ -385,7 +599,7 @@ public sealed class VirtualMachine
     /// rather than in bytecode, so it has to charge the same budget or a cyclic structure
     /// would overflow the host stack instead of raising <c>RecursionError</c>.
     /// </remarks>
-    public IDisposable EnterRecursion()
+    public RecursionLevel EnterRecursion()
     {
         if (++_depth > RecursionLimit)
         {
@@ -397,9 +611,24 @@ public sealed class VirtualMachine
         return new RecursionLevel(this);
     }
 
-    private sealed class RecursionLevel(VirtualMachine machine) : IDisposable
+    /// <summary>
+    /// One level of host recursion, given back when disposed — a struct, so <c>using var</c>
+    /// over it allocates nothing on paths (a dataclass comparison) that run per element.
+    /// </summary>
+    public readonly struct RecursionLevel : IDisposable
     {
-        public void Dispose() => machine._depth--;
+        private readonly VirtualMachine? _machine;
+
+        internal RecursionLevel(VirtualMachine machine) => _machine = machine;
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_machine is not null)
+            {
+                _machine._depth--;
+            }
+        }
     }
 
     /// <summary>
@@ -417,7 +646,15 @@ public sealed class VirtualMachine
         _ => throw new PyRaise(PyErrors.TypeError($"'{value.TypeName}' object can't be awaited")),
     };
 
-    private PyObject CallFunction(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    private PyObject CallFunction(PyFunction function, PyObject[] arguments, PyDict? keywords) =>
+        CallFunction(function, arguments.AsSpan(), keywords);
+
+    /// <summary>
+    /// Calls a Python function. The arguments are a span because a call from bytecode
+    /// passes them straight off the caller's value stack, with no array in between: binding
+    /// copies them into the callee's locals before anything else can run.
+    /// </summary>
+    private PyObject CallFunction(PyFunction function, ReadOnlySpan<PyObject> arguments, PyDict? keywords)
     {
         if (++_depth > RecursionLimit)
         {
@@ -428,23 +665,32 @@ public sealed class VirtualMachine
 
         try
         {
-            var locals = BindArguments(function, arguments, keywords);
-            var cells = BuildCells(function, locals);
-            var frame = new Frame(function.Code, function.Globals, locals, cells);
+            var code = function.Code;
 
-            if (function.Code.IsGenerator)
+            // A generator's or a coroutine's frame outlives the call, so it is a frame of
+            // its own; every other frame ends with the call and is pooled.
+            if (code.IsGenerator || code.IsCoroutine)
             {
-                // A generator call runs nothing yet; it materializes lazily on iteration.
-                return new PyGenerator(this, frame);
+                var locals = BindArguments(function, arguments, keywords, rent: false);
+                var frame = new Frame(code, function.Globals, locals, BuildCells(function, locals));
+
+                return code.IsGenerator
+                    ? new PyGenerator(this, frame)
+                    : Coroutine(function.Name, frame);
             }
 
-            // Calling an `async def` produces a coroutine; the body runs when it is awaited.
-            if (function.Code.IsCoroutine)
-            {
-                return new PyCoroutine(function.Name, () => Execute(frame));
-            }
+            var pooledLocals = BindArguments(function, arguments, keywords, rent: true);
+            var rented = _rentedLocals;
+            var pooled = RentFrame(code, function.Globals, pooledLocals, rented, BuildCells(function, pooledLocals));
 
-            return Execute(frame);
+            try
+            {
+                return Execute(pooled);
+            }
+            finally
+            {
+                ReturnFrame(pooled);
+            }
         }
         finally
         {
@@ -452,12 +698,75 @@ public sealed class VirtualMachine
         }
     }
 
+    /// <summary>
+    /// Calls a method with its receiver as the first argument, without making a bound
+    /// method for one call: the receiver and the arguments go into a rented buffer, which
+    /// binding copies out of before anything runs.
+    /// </summary>
+    internal PyObject CallWithReceiver(PyFunction function, PyObject receiver, PyObject[] arguments, PyDict? keywords)
+    {
+        if (function.BoundSelf is not null)
+        {
+            return CallFunction(function, arguments, keywords);
+        }
+
+        var buffer = System.Buffers.ArrayPool<PyObject>.Shared.Rent(arguments.Length + 1);
+
+        try
+        {
+            buffer[0] = receiver;
+            arguments.CopyTo(buffer, 1);
+            return CallFunction(function, buffer.AsSpan(0, arguments.Length + 1), keywords);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<PyObject>.Shared.Return(buffer, clearArray: true);
+        }
+    }
+
+    /// <summary>Finished frames kept for the next call, so a call allocates no frame, stack or block list.</summary>
+    private readonly Stack<Frame> _framePool = new();
+
+    /// <summary>How many idle frames are kept: enough for a deep recursion's return trip, bounded so a one-off spike is not held forever.</summary>
+    private const int FramePoolLimit = 256;
+
+    private Frame RentFrame(CodeObject code, PyDict globals, PyObject?[] locals, bool rented, Dictionary<string, PyCell>? cells)
+    {
+        if (_framePool.TryPop(out var frame))
+        {
+            frame.Reuse(code, globals, locals, rented, cells);
+            return frame;
+        }
+
+        frame = new Frame(code, globals, [], null);
+        frame.Reuse(code, globals, locals, rented, cells);
+        return frame;
+    }
+
+    private void ReturnFrame(Frame frame)
+    {
+        frame.Release();
+
+        if (_framePool.Count < FramePoolLimit)
+        {
+            _framePool.Push(frame);
+        }
+    }
+
+    /// <summary>
+    /// A coroutine over a frame. Its own method because the lambda captures the frame, and a
+    /// captured local makes the compiler allocate the closure on entry to the method that
+    /// declares it — which in the function-calling path would be every call.
+    /// </summary>
+    private PyCoroutine Coroutine(string name, Frame frame) => new(name, () => Execute(frame));
+
     private Dictionary<string, PyCell>? BuildCells(PyFunction function, PyObject?[] locals)
     {
         var code = function.Code;
 
-        // Nothing captured either way: the frame gets no cell dictionary at all.
-        if (function.Closure.Count == 0 && code.CellNames.Count == 0)
+        // Nothing captured either way, or nothing that will ever be read: the frame gets no
+        // cell dictionary at all.
+        if (code.CellNames.Count == 0 && (function.Closure.Count == 0 || !code.ReadsEnclosingCells))
         {
             return null;
         }
@@ -537,33 +846,96 @@ public sealed class VirtualMachine
     };
 
     /// <summary>Binds call arguments to parameter slots, applying defaults and packing varargs.</summary>
-    private PyObject?[] BindArguments(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    /// <summary>Set by <see cref="BindArguments"/> when the locals it returned were rented.</summary>
+    private bool _rentedLocals;
+
+    private PyObject?[] BindArguments(PyFunction function, ReadOnlySpan<PyObject> arguments, PyDict? keywords, bool rent)
     {
         var code = function.Code;
         var parameters = code.Parameters;
-        var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
-        var declaredParameters = parameters.Parameters;
+        _rentedLocals = false;
 
-        // The ordinary call: one argument per parameter and nothing to reconcile. What
-        // follows exists for the shapes that need reconciling — defaults, varargs,
-        // keywords, a bound receiver — and none of it says anything about this one, so it
-        // is skipped rather than walked through. A recursive function pays this per call.
-        if (arguments.Length == declaredParameters.Count
-            && keywords is null or { Count: 0 }
-            && function.BoundSelf is null
+        // The ordinary calls: positional arguments only, a receiver perhaps, trailing
+        // parameters perhaps filled from their defaults — a plain function, a method, a
+        // method with an optional argument. Nothing here allocates beyond the locals; the
+        // shapes that need reconciling (keywords, varargs, errors) take the general path.
+        if (keywords is null or { Count: 0 }
             && parameters.VarArgs is null
             && parameters.KeywordArgs is null
             && parameters.KeywordOnly.Count == 0)
         {
+            var self = function.BoundSelf;
+            var offset = self is null ? 0 : 1;
+            var supplied = arguments.Length + offset;
             var slots = code.ParameterSlots;
 
-            for (var i = 0; i < slots.Length; i++)
+            if (supplied <= slots.Length)
             {
-                locals[slots[i]] = arguments[i];
-            }
+                var defaults = supplied < slots.Length ? function.DefaultsByPosition : null;
+                var complete = true;
 
-            return locals;
+                for (var i = supplied; i < slots.Length; i++)
+                {
+                    if (defaults![i] is null)
+                    {
+                        complete = false;
+                        break;
+                    }
+                }
+
+                if (complete)
+                {
+                    var size = Math.Max(code.LocalNames.Count, 1);
+                    PyObject?[] locals;
+
+                    // Rented locals come back cleared (see Frame.Release), so every slot
+                    // the call does not fill starts unbound, as a fresh array would.
+                    if (rent)
+                    {
+                        locals = System.Buffers.ArrayPool<PyObject?>.Shared.Rent(size);
+                        _rentedLocals = true;
+                    }
+                    else
+                    {
+                        locals = new PyObject?[size];
+                    }
+
+                    if (self is not null)
+                    {
+                        locals[slots[0]] = self;
+                    }
+
+                    for (var i = 0; i < arguments.Length; i++)
+                    {
+                        locals[slots[i + offset]] = arguments[i];
+                    }
+
+                    for (var i = supplied; i < slots.Length; i++)
+                    {
+                        locals[slots[i]] = defaults![i];
+                    }
+
+                    return locals;
+                }
+            }
         }
+
+        return BindArgumentsGenerally(function, arguments.ToArray(), keywords);
+    }
+
+    /// <summary>
+    /// Binds every other calling convention, and reports every error, as CPython words it.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="BindArguments"/> because its lambdas capture the function
+    /// and the keywords, and the compiler allocates a captured variable's closure on entry
+    /// to the method that declares it — which in the fast path would be every call.
+    /// </remarks>
+    private PyObject?[] BindArgumentsGenerally(PyFunction function, PyObject[] arguments, PyDict? keywords)
+    {
+        var code = function.Code;
+        var parameters = code.Parameters;
+        var locals = new PyObject?[Math.Max(code.LocalNames.Count, 1)];
 
         var positional = new List<PyObject>(arguments);
 
@@ -717,11 +1089,51 @@ public sealed class VirtualMachine
             _cells = cells;
         }
 
-        public CodeObject Code { get; }
+        public CodeObject Code { get; private set; }
 
-        public PyDict Globals { get; }
+        public PyDict Globals { get; private set; }
 
-        public PyObject?[] Locals { get; }
+        /// <summary>
+        /// The local slots — at least <c>Code.LocalNames.Count</c> of them, and more when
+        /// the array was rented from the pool.
+        /// </summary>
+        public PyObject?[] Locals { get; private set; }
+
+        /// <summary>Whether <see cref="Locals"/> came from <see cref="System.Buffers.ArrayPool{T}"/>.</summary>
+        private bool _localsRented;
+
+        /// <summary>Readies a pooled frame for another call.</summary>
+        public void Reuse(CodeObject code, PyDict globals, PyObject?[] locals, bool localsRented, Dictionary<string, PyCell>? cells)
+        {
+            Code = code;
+            Globals = globals;
+            Locals = locals;
+            _localsRented = localsRented;
+            _cells = cells;
+        }
+
+        /// <summary>
+        /// Clears a finished frame for the pool: its stack and block lists keep their
+        /// capacity, its locals go back to the array pool, and it holds on to nothing the
+        /// call produced.
+        /// </summary>
+        public void Release()
+        {
+            Stack.Clear();
+            Blocks.Clear();
+            _cells = null;
+            CurrentException = null;
+            InstructionPointer = 0;
+            CurrentLine = 0;
+
+            if (_localsRented)
+            {
+                System.Buffers.ArrayPool<PyObject?>.Shared.Return(Locals, clearArray: true);
+                _localsRented = false;
+            }
+
+            Locals = [];
+        }
 
         /// <summary>
         /// The closure cells, made real on first need.
@@ -831,6 +1243,8 @@ public sealed class VirtualMachine
                 throw new PyRaise(PyErrors.RuntimeError("instruction limit exceeded"));
             }
 
+            CheckCancellation();
+
             try
             {
                 if (Step(frame, instruction, out _))
@@ -869,6 +1283,8 @@ public sealed class VirtualMachine
                 {
                     throw new PyRaise(PyErrors.RuntimeError("instruction limit exceeded"));
                 }
+
+                CheckCancellation();
 
                 var instruction = frame.Code.Instructions[frame.InstructionPointer++];
                 frame.CurrentLine = instruction.Line;
@@ -1149,6 +1565,65 @@ public sealed class VirtualMachine
                 return false;
             }
 
+            case OpCode.LoadMethod:
+            {
+                var target = frame.Pop();
+                var name = code.Names[instruction.Operand];
+
+                // A function on the class is not a data descriptor, so only an override of
+                // `__getattribute__` or an instance field of the same name could change
+                // what `instance.name` means; with neither, it is this function, bound.
+                if (target is PyInstance instance
+                    && instance.Class.Lookup(name) is PyFunction { BoundSelf: null } method
+                    && instance.Class.Lookup("__getattribute__") is not PyFunction
+                    && !instance.Fields.ContainsKey(name))
+                {
+                    frame.Push(method);
+                    frame.Push(instance);
+                    return false;
+                }
+
+                // `super().method(...)`, the other common shape: the function found past
+                // the current class, with the original receiver.
+                if (target is PySuper { Receiver: not PyClass } parent
+                    && parent.FindMember(name) is PyFunction { BoundSelf: null } inherited)
+                {
+                    frame.Push(inherited);
+                    frame.Push(parent.Receiver);
+                    return false;
+                }
+
+                frame.Push(Attributes.Get(this, target, name));
+                frame.Push(MethodMarker.Instance);
+                return false;
+            }
+
+            case OpCode.CallMethod:
+            {
+                var count = instruction.Operand;
+                var stack = frame.Stack;
+                var start = stack.Count - count;
+                var receiver = stack[start - 1];
+                var callable = stack[start - 2];
+                PyObject returned;
+
+                if (receiver is MethodMarker)
+                {
+                    returned = callable is PyFunction function
+                        ? CallFunction(function, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count), null)
+                        : Call(callable, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count).ToArray());
+                }
+                else
+                {
+                    // The receiver sits just below the arguments, so it is the first of them.
+                    returned = CallFunction((PyFunction)callable, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start - 1, count + 1), null);
+                }
+
+                stack.RemoveRange(start - 2, count + 2);
+                frame.Push(returned);
+                return false;
+            }
+
             case OpCode.LoadAttr:
             {
                 var target = frame.Pop();
@@ -1162,6 +1637,13 @@ public sealed class VirtualMachine
                 var target = frame.Pop();
                 var value = frame.Pop();
                 var name = code.Names[instruction.Operand];
+
+                // `self.x = v` on an ordinary instance: the field is keyed by the name object
+                // the code already holds, rather than by a new string object per instance.
+                if (target is PyInstance instance && instance.TrySetPlainField(name, code.NameKey(instruction.Operand), value))
+                {
+                    return false;
+                }
 
                 if (!target.SetAttribute(name, value))
                 {
@@ -1597,7 +2079,21 @@ public sealed class VirtualMachine
 
             case OpCode.Call:
             {
-                var arguments = PopMany(frame, instruction.Operand).ToArray();
+                var count = instruction.Operand;
+                var stack = frame.Stack;
+                var start = stack.Count - count;
+
+                // A Python function reads its arguments straight off this stack: the callee
+                // runs on a frame of its own and copies them into its locals first.
+                if (stack[start - 1] is PyFunction function)
+                {
+                    var returned = CallFunction(function, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(stack).Slice(start, count), null);
+                    stack.RemoveRange(start - 1, count + 1);
+                    frame.Push(returned);
+                    return false;
+                }
+
+                var arguments = PopArray(frame, count);
                 var callable = frame.Pop();
                 frame.Push(Call(callable, arguments));
                 return false;
@@ -1648,11 +2144,34 @@ public sealed class VirtualMachine
             case OpCode.MakeClass:
             {
                 var body = (PyFunction)frame.Pop();
+                var keywords = (PyDict)frame.Pop();
+                var bases = (PyTuple)frame.Pop();
                 var name = frame.Pop().Display();
+                frame.Push(BuildClass(name, body, bases, keywords));
+                return false;
+            }
 
-                // The class body runs in its own frame; its locals become the namespace.
-                var members = RunClassBody(body);
-                frame.Push(new PyClass(name, members));
+            case OpCode.LoadClassCell:
+            {
+                if (!frame.TryGetCell("__class__", out var cell) || cell.Value is not PyClass owner)
+                {
+                    throw new PyRaise(PyErrors.RuntimeError("super(): __class__ cell not found"));
+                }
+
+                frame.Push(owner);
+                return false;
+            }
+
+            case OpCode.DeleteAttr:
+            {
+                var target = frame.Pop();
+                var name = code.Names[instruction.Operand];
+
+                if (!target.DeleteAttribute(name))
+                {
+                    throw new PyRaise(PyErrors.AttributeError(target.TypeName, name));
+                }
+
                 return false;
             }
 
@@ -1804,6 +2323,90 @@ public sealed class VirtualMachine
                 return false;
             }
 
+            case OpCode.MatchSequenceCheck:
+            {
+                var subject = frame.Peek();
+                var count = instruction.Operand >> 1;
+                var starred = (instruction.Operand & 1) == 1;
+                var length = PatternSequenceLength(subject);
+
+                frame.Push(PyBool.Of(length is { } known && (starred ? known >= count - 1 : known == count)));
+                return false;
+            }
+
+            case OpCode.MatchMappingCheck:
+                frame.Push(PyBool.Of(ClassModel.Unwrap(frame.Peek()) is PyDict));
+                return false;
+
+            case OpCode.MatchKeys:
+            {
+                var keys = ((PyTuple)frame.Pop()).Items;
+                var mapping = (PyDict)ClassModel.Unwrap(frame.Pop());
+                var values = new List<PyObject>(keys.Count);
+                var seen = new PyDict();
+
+                foreach (var key in keys)
+                {
+                    if (seen.Contains(key))
+                    {
+                        throw new PyRaise(PyErrors.ValueError($"mapping pattern checks duplicate key ({key.Repr()})"));
+                    }
+
+                    seen.Set(key, PyNone.Instance);
+
+                    // A plain lookup: a defaultdict's factory must not run for a pattern.
+                    if (!mapping.TryGetValue(key, out var value))
+                    {
+                        frame.Push(PyNone.Instance);
+                        return false;
+                    }
+
+                    values.Add(value);
+                }
+
+                frame.Push(new PyTuple(values));
+                return false;
+            }
+
+            case OpCode.DictWithoutKeys:
+            {
+                var keys = ((PyTuple)frame.Pop()).Items;
+                var mapping = (PyDict)ClassModel.Unwrap(frame.Pop());
+                var rest = new PyDict();
+
+                foreach (var (key, value) in mapping.Entries)
+                {
+                    if (!keys.Any(k => SameOrEqualKey(k, key)))
+                    {
+                        rest.Set(key, value);
+                    }
+                }
+
+                frame.Push(rest);
+                return false;
+            }
+
+            case OpCode.MatchClass:
+            {
+                var names = ((PyTuple)frame.Pop()).Items;
+                var type = frame.Pop();
+                var subject = frame.Pop();
+                frame.Push(MatchClassPattern(subject, type, instruction.Operand, names));
+                return false;
+            }
+
+            case OpCode.ImportStar:
+            {
+                var module = frame.Pop();
+
+                foreach (var (name, value) in PublicNames(module))
+                {
+                    frame.Globals.Set(new PyStr(name), value);
+                }
+
+                return false;
+            }
+
             case OpCode.Assert:
             {
                 var message = instruction.Operand == 1 ? frame.Pop().Display() : string.Empty;
@@ -1815,10 +2418,315 @@ public sealed class VirtualMachine
         }
     }
 
-    private PyDict RunClassBody(PyFunction body)
+    /// <summary>
+    /// The length of a value a sequence pattern can match, or null for one it cannot:
+    /// strings and bytes are deliberately not sequences to <c>match</c>, nor are mappings.
+    /// </summary>
+    private static int? PatternSequenceLength(PyObject subject) => ClassModel.Unwrap(subject) switch
+    {
+        PyStr or PyBytes or PyByteArray or PyDict => null,
+        PyList list => list.Items.Count,
+        PyTuple tuple => tuple.Items.Count,
+        PyRange range => range.Length(),
+        PyDeque deque => deque.Length(),
+        _ => null,
+    };
+
+    private static bool SameOrEqualKey(PyObject left, PyObject right) =>
+        ReferenceEquals(left, right) || left.PyEquals(right);
+
+    /// <summary>The types whose class pattern's single positional sub-pattern matches the subject itself.</summary>
+    private static readonly HashSet<string> SelfMatchingTypes = new(StringComparer.Ordinal)
+    {
+        "bool", "bytearray", "bytes", "dict", "float", "frozenset", "int", "list", "set", "str", "tuple",
+    };
+
+    /// <summary>
+    /// <c>case Cls(p1, p2, k=p3)</c>: the subject's attributes, positional ones named by
+    /// <c>__match_args__</c>, or None when the subject is not an instance or lacks one.
+    /// </summary>
+    private PyObject MatchClassPattern(PyObject subject, PyObject type, int positional, IReadOnlyList<PyObject> names)
+    {
+        if (type is not (PyClass or PyType or PyExceptionType or PyNamedTupleType or Computerwelt.Emulation.Python.Modules.DatetimeModule.IPyClassLike))
+        {
+            throw new PyRaise(PyErrors.TypeError("called match pattern must be a class"));
+        }
+
+        if (!TypeRegistry.IsInstance(subject, type))
+        {
+            return PyNone.Instance;
+        }
+
+        var values = new List<PyObject>(positional + names.Count);
+
+        if (positional > 0)
+        {
+            if (type is PyType builtin && SelfMatchingTypes.Contains(builtin.Name))
+            {
+                if (positional > 1)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"{builtin.Name}() accepts 1 positional sub-pattern ({positional} given)"));
+                }
+
+                values.Add(subject);
+            }
+            else
+            {
+                var matchArgs = type switch
+                {
+                    PyNamedTupleType namedTuple => namedTuple.Fields.Select(static f => (PyObject)new PyStr(f)).ToList(),
+                    _ => Attributes.TryGet(this, type, "__match_args__") is { } declared
+                        ? declared is PyTuple tuple
+                            ? tuple.Items.ToList()
+                            : throw new PyRaise(PyErrors.TypeError(
+                                $"{TypeName(type)}.__match_args__ must be a tuple (got {declared.TypeName})"))
+                        : [],
+                };
+
+                if (positional > matchArgs.Count)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"{TypeName(type)}() accepts {matchArgs.Count} positional sub-pattern{(matchArgs.Count == 1 ? string.Empty : "s")} ({positional} given)"));
+                }
+
+                for (var i = 0; i < positional; i++)
+                {
+                    if (Attributes.TryGet(this, subject, matchArgs[i].Display()) is not { } value)
+                    {
+                        return PyNone.Instance;
+                    }
+
+                    values.Add(value);
+                }
+            }
+        }
+
+        foreach (var name in names)
+        {
+            if (Attributes.TryGet(this, subject, name.Display()) is not { } value)
+            {
+                return PyNone.Instance;
+            }
+
+            values.Add(value);
+        }
+
+        return new PyTuple(values);
+
+        static string TypeName(PyObject type) => type is PyCallable callable ? callable.Name : type.TypeName;
+    }
+
+    /// <summary>
+    /// What <c>from m import *</c> binds: the names in <c>__all__</c> when the module
+    /// declares it, otherwise every name not starting with an underscore.
+    /// </summary>
+    private static IEnumerable<(string Name, PyObject Value)> PublicNames(PyObject module)
+    {
+        if (module.GetAttribute("__all__") is { } declared)
+        {
+            foreach (var entry in RequireIterable(declared))
+            {
+                var name = entry.Display();
+
+                yield return (name, module.GetAttribute(name)
+                    ?? throw new PyRaise(PyErrors.AttributeError("module", name)));
+            }
+
+            yield break;
+        }
+
+        var names = module switch
+        {
+            Modules.PyModuleObject builtIn => builtIn.AttributeNames.ToList(),
+            PySourceModule source => source.AttributeNames.ToList(),
+            _ => throw new PyRaise(new PyException(
+                PyExceptionType.ImportError, "import * is not supported for this object")),
+        };
+
+        foreach (var name in names)
+        {
+            if (!name.StartsWith('_') && module.GetAttribute(name) is { } value)
+            {
+                yield return (name, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds a class from its statement: resolves the bases, runs the body, and then does
+    /// what <c>type.__new__</c> does once the class exists — fill the <c>__class__</c>
+    /// cell, call <c>__set_name__</c> on descriptors and <c>__init_subclass__</c> on the
+    /// parent.
+    /// </summary>
+    private PyObject BuildClass(string name, PyFunction body, PyTuple bases, PyDict keywords)
+    {
+        var resolved = new List<PyObject>();
+        Modules.TypeAlias? special = null;
+
+        foreach (var candidate in bases.Items)
+        {
+            switch (candidate)
+            {
+                // `Generic[T]` and `Protocol` exist for type checkers; at run time they add
+                // nothing, so they are dropped from the bases as CPython's `__mro_entries__`
+                // would reduce them to `Generic`.
+                case Modules.TypeAlias alias when alias.Name is "Generic" or "Protocol":
+                    break;
+
+                case Modules.TypeAlias alias when alias.Name is "NamedTuple" or "TypedDict":
+                    special = alias;
+                    break;
+
+                case PyClass or PyType or PyExceptionType:
+                    resolved.Add(candidate);
+                    break;
+
+                default:
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"bases must be types, not {candidate.TypeName}"));
+            }
+        }
+
+        var metaclass = keywords.TryGetValue(new PyStr("metaclass"), out var declared) ? declared : null;
+
+        if (metaclass is not null)
+        {
+            keywords.Remove(new PyStr("metaclass"));
+
+            // `abc.ABCMeta` is the one metaclass a program may name: abstract-method
+            // checking is built into instantiation here, so it needs no metaclass at all.
+            if (!(metaclass is PyClass { Name: "ABCMeta" } || ReferenceEquals(metaclass, TypeRegistry.Type)))
+            {
+                throw new PyRaise(new PyException(
+                    PyExceptionType.NotImplementedError, "custom metaclasses are not supported"));
+            }
+        }
+
+        var classCell = new PyCell();
+        var members = RunClassBody(body, classCell);
+
+        if (special is not null)
+        {
+            return special.Name == "NamedTuple"
+                ? BuildNamedTuple(name, members)
+                : BuildTypedDict(name);
+        }
+
+        if (metaclass is PyClass { Name: "ABCMeta" } && !members.TryGetValue(new PyStr("__abstractmethods__"), out _))
+        {
+            members.Set(new PyStr("__abstractmethods__"), PyBool.True);
+        }
+
+        // `__new__` and `__init_subclass__` are implicitly static and class methods.
+        if (members.TryGetValue(new PyStr("__init_subclass__"), out var hook) && hook is PyFunction initSubclass)
+        {
+            members.Set(new PyStr("__init_subclass__"), new PyClassMethod(initSubclass));
+        }
+
+        if (members.TryGetValue(new PyStr("__class_getitem__"), out var getter) && getter is PyFunction classGetItem)
+        {
+            members.Set(new PyStr("__class_getitem__"), new PyClassMethod(classGetItem));
+        }
+
+        var type = new PyClass(name, members, resolved, this);
+        classCell.Value = type;
+
+        foreach (var (key, value) in members.Entries)
+        {
+            switch (value)
+            {
+                case PyProperty property:
+                    property.Name ??= key.Display();
+                    break;
+
+                case PyInstance descriptor when descriptor.Dunder("__set_name__") is { } setName:
+                    descriptor.Invoke(setName, [type, key]);
+                    break;
+            }
+        }
+
+        type.Behaviour?.Created(this, type, keywords);
+
+        // The parent's hook, not the new class's own: it is how a base registers or
+        // validates its subclasses.
+        if (type.Mro.Count > 1)
+        {
+            var parentHook = new PySuper(this, type, type).GetAttribute("__init_subclass__");
+
+            if (parentHook is not null)
+            {
+                Call(parentHook, [], keywords.Count > 0 ? keywords : null);
+            }
+            else if (keywords.Count > 0)
+            {
+                throw new PyRaise(PyErrors.TypeError($"{name}.__init_subclass__() takes no keyword arguments"));
+            }
+        }
+        else if (keywords.Count > 0)
+        {
+            throw new PyRaise(PyErrors.TypeError($"{name}.__init_subclass__() takes no keyword arguments"));
+        }
+
+        return type;
+    }
+
+    /// <summary><c>class P(NamedTuple)</c>: the annotations are the fields, assignments their defaults.</summary>
+    private static PyObject BuildNamedTuple(string name, PyDict members)
+    {
+        var fields = new List<string>();
+        var defaults = new List<PyObject>();
+
+        if (members.TryGetValue(new PyStr("__annotations__"), out var annotations) && annotations is PyDict declared)
+        {
+            foreach (var (key, _) in declared.Entries)
+            {
+                var field = key.Display();
+                fields.Add(field);
+
+                if (members.TryGetValue(key, out var value))
+                {
+                    defaults.Add(value);
+                }
+                else if (defaults.Count > 0)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"Non-default namedtuple field {field} cannot follow default field"));
+                }
+            }
+        }
+
+        var type = new PyNamedTupleType(name, fields, defaults);
+
+        // Methods and class attributes in the body travel with the type.
+        foreach (var (key, value) in members.Entries)
+        {
+            var member = key.Display();
+
+            if (!fields.Contains(member) && member is not "__annotations__" and not "__module__" and not "__qualname__")
+            {
+                type.Methods[member] = value;
+            }
+        }
+
+        return type;
+    }
+
+    /// <summary><c>class Movie(TypedDict)</c>: calling it builds a plain dict, as CPython's does.</summary>
+    private static PyObject BuildTypedDict(string name) =>
+        new PyType(name, static value => value is PyDict, static (arguments, keywords) =>
+            TypeRegistry.Dict.Construct(arguments, keywords));
+
+    private PyDict RunClassBody(PyFunction body, PyCell classCell)
     {
         var locals = new PyObject?[body.Code.LocalNames.Count];
-        var frame = new Frame(body.Code, body.Globals, locals, new Dictionary<string, PyCell>(body.Closure, StringComparer.Ordinal));
+        var cells = new Dictionary<string, PyCell>(body.Closure, StringComparer.Ordinal)
+        {
+            // The implicit cell zero-argument `super()` reads; filled once the class exists.
+            ["__class__"] = classCell,
+        };
+
+        var frame = new Frame(body.Code, body.Globals, locals, cells);
 
         Execute(frame);
 
@@ -1878,8 +2786,9 @@ public sealed class VirtualMachine
     {
         PyExceptionType type => actual.IsInstanceOf(type),
 
-        // A user class cannot be an exception type here, but it is at least a class; a
-        // value that is not a class at all is a mistake worth naming.
+        // A Python class is an exception type when it derives from one; any other class is
+        // at least a class, and simply never matches.
+        PyClass { ExceptionType: { } type } => actual.IsInstanceOf(type),
         PyClass => false,
         _ => throw new PyRaise(PyErrors.TypeError(
             "catching classes that do not inherit from BaseException is not allowed")),
@@ -1916,8 +2825,34 @@ public sealed class VirtualMachine
     {
         PyException exception => exception,
         PyExceptionType type => new PyException(type, string.Empty),
+        PyClass { ExceptionType: not null } type => Call(type, []) as PyException
+            ?? throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
         _ => throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
     };
+
+    /// <summary>The stack slot <c>LoadMethod</c> leaves empty when it found no plain method.</summary>
+    private sealed class MethodMarker : PyObject
+    {
+        public static MethodMarker Instance { get; } = new();
+
+        public override string TypeName => "NULL";
+
+        public override string Repr() => "<NULL>";
+    }
+
+    /// <summary>Pops <paramref name="count"/> values into an array of exactly that size.</summary>
+    private static PyObject[] PopArray(Frame frame, int count)
+    {
+        if (count <= 0)
+        {
+            return [];
+        }
+
+        var start = frame.Stack.Count - count;
+        var values = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(frame.Stack).Slice(start, count).ToArray();
+        frame.Stack.RemoveRange(start, count);
+        return values;
+    }
 
     private static List<PyObject> PopMany(Frame frame, int count)
     {

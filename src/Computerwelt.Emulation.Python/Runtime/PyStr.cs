@@ -321,8 +321,12 @@ public sealed class PyBytes : PyObject
     public override int? Length() => Value.Length;
 
     /// <inheritdoc />
-    public override bool PyEquals(PyObject other) =>
-        other is PyBytes bytes && Value.AsSpan().SequenceEqual(bytes.Value);
+    public override bool PyEquals(PyObject other) => other switch
+    {
+        PyBytes bytes => Value.AsSpan().SequenceEqual(bytes.Value),
+        PyByteArray array => Value.AsSpan().SequenceEqual([.. array.Value]),
+        _ => false,
+    };
 
     /// <inheritdoc />
     public override BigInteger PyHash()
@@ -347,6 +351,7 @@ public sealed class PyBytes : PyObject
     public override bool Contains(PyObject item) => item switch
     {
         PyBytes needle => Value.AsSpan().IndexOf(needle.Value) >= 0,
+        PyByteArray needle => Value.AsSpan().IndexOf([.. needle.Value]) >= 0,
         PyInt b when b.Value >= 0 && b.Value <= 255 => Value.Contains((byte)b.Value),
         PyInt => throw new PyRaise(PyErrors.ValueError("byte must be in range(0, 256)")),
         _ => throw new PyRaise(PyErrors.TypeError(

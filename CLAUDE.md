@@ -114,6 +114,8 @@ the speed and the snapshot-at-a-call-boundary feature both depend on it.
 | `modules/` | `Modules/` | the permitted stdlib subset |
 | `crates/monty-types/` | `Interop/` | host-facing object model and external functions |
 | — | `Extensibility/` | host libraries: `PythonLibrary`, built per run, written in C# or in Python |
+| — | `PythonSession.cs`, `Modules/DisplayModule.cs` | notebook sessions: cells over one namespace, ordered MIME-bundle outputs, cancellation |
+| — | `Modules/Numpy/`, `Modules/Pandas/` | managed subsets of numpy and pandas, built on first import; host operators via `IPyOperand` |
 | `crates/monty-fs/` | `Computerwelt/PythonFileSystem` | `os`, `os.path` and `open` over this repo's `IFileSystem`, so both sandboxes share one VFS |
 | `crates/monty-type-checking/` | — | out of scope: wraps `ty`, an external type checker |
 

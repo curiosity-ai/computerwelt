@@ -397,8 +397,22 @@ internal static class SequenceOps
 /// </remarks>
 public class PyDict : PyObject
 {
-    private readonly Dictionary<PyKey, int> _index = [];
-    private readonly List<KeyValuePair<PyObject, PyObject>> _entries = [];
+    private readonly Dictionary<PyKey, int> _index;
+    private readonly List<KeyValuePair<PyObject, PyObject>> _entries;
+
+    /// <summary>Creates an empty dict.</summary>
+    public PyDict()
+    {
+        _index = [];
+        _entries = [];
+    }
+
+    /// <summary>Creates an empty dict sized for <paramref name="capacity"/> entries, so filling it never resizes.</summary>
+    public PyDict(int capacity)
+    {
+        _index = new Dictionary<PyKey, int>(capacity);
+        _entries = new List<KeyValuePair<PyObject, PyObject>>(capacity);
+    }
 
     /// <summary>A shared empty dictionary, for bootstrapping.</summary>
     public static PyDict Empty { get; } = new();
@@ -528,6 +542,41 @@ public class PyDict : PyObject
         }
     }
 
+    /// <summary>Looks up the <c>str</c> key <paramref name="key"/> without allocating one.</summary>
+    public bool TryGetValue(string key, out PyObject value)
+    {
+        if (_index.TryGetValue(new PyKey(key), out var position))
+        {
+            value = _entries[position].Value;
+            return true;
+        }
+
+        value = PyNone.Instance;
+        return false;
+    }
+
+    /// <summary>Whether the <c>str</c> key <paramref name="key"/> is present, without allocating one.</summary>
+    public bool ContainsKey(string key) => _index.ContainsKey(new PyKey(key));
+
+    /// <summary>
+    /// Sets the <c>str</c> key <paramref name="key"/>; a <see cref="PyStr"/> is made only when
+    /// the key is new, since the dict has to store one.
+    /// </summary>
+    public void Set(string key, PyObject value)
+    {
+        if (_index.TryGetValue(new PyKey(key), out var position))
+        {
+            _entries[position] = new KeyValuePair<PyObject, PyObject>(_entries[position].Key, value);
+            return;
+        }
+
+        Set(new PyStr(key), value);
+    }
+
+    /// <summary>Removes the <c>str</c> key <paramref name="key"/>.</summary>
+    public bool Remove(string key) =>
+        _index.TryGetValue(new PyKey(key), out var position) && Remove(_entries[position].Key);
+
     /// <summary>Reads a value by key.</summary>
     public bool TryGetValue(PyObject key, out PyObject value)
     {
@@ -626,11 +675,25 @@ public class PyDict : PyObject
 internal readonly struct PyKey : IEquatable<PyKey>
 {
     private readonly int _hash;
+    private readonly string? _text;
 
     public PyKey(PyObject value)
     {
         Value = value;
         _hash = value.PyHash().GetHashCode();
+    }
+
+    /// <summary>
+    /// A probe for the key <c>str(text)</c> that needs no <see cref="PyStr"/>: it hashes as
+    /// that string would (<see cref="PyStr.PyHash"/>) and equals a stored <c>str</c> key with
+    /// the same characters. Attribute names are looked up this way, on every access, so it
+    /// is the difference between a lookup and an allocation.
+    /// </summary>
+    public PyKey(string text)
+    {
+        Value = null!;
+        _text = text;
+        _hash = new BigInteger(StringComparer.Ordinal.GetHashCode(text)).GetHashCode();
     }
 
     private PyKey(PyObject value, int hash)
@@ -657,7 +720,25 @@ internal readonly struct PyKey : IEquatable<PyKey>
 
     // Identity first, as `PyObject_RichCompareBool` does: a NaN is its own dict key even
     // though it equals nothing, including itself.
-    public bool Equals(PyKey other) => PyObject.SameOrEqual(Value, other.Value);
+    public bool Equals(PyKey other)
+    {
+        if (_text is not null || other._text is not null)
+        {
+            var text = _text ?? other._text;
+            var stored = _text is null ? Value : other.Value;
+
+            return stored is null
+                ? string.Equals(_text, other._text, StringComparison.Ordinal)
+                : stored switch
+                {
+                    PyStr str => string.Equals(str.Value, text, StringComparison.Ordinal),
+                    PyInstance { BuiltinValue: PyStr inner } => string.Equals(inner.Value, text, StringComparison.Ordinal),
+                    _ => false,
+                };
+        }
+
+        return PyObject.SameOrEqual(Value, other.Value);
+    }
 
     public override bool Equals(object? obj) => obj is PyKey other && Equals(other);
 

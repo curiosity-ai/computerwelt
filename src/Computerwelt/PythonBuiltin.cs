@@ -56,37 +56,13 @@ public sealed class PythonBuiltin : IBuiltin
             return error;
         }
 
-        var runner = new PythonRunner(new PythonLimits
-        {
-            MaxInstructions = _options.MaxInstructions,
-            MaxRecursionDepth = _options.MaxRecursionDepth,
-            MaxDirectoryDepth = _options.MaxDirectoryDepth,
-        });
-
         // The filesystem modules close over the shell's state, so `os.getcwd()` follows a
         // `cd` that happened earlier in the same script, and `open` reads the same files
         // the surrounding shell commands wrote.
-        runner.FileSystem = new ShellFileSystem(
+        var runner = _options.CreateRunner(new ShellFileSystem(
             context.FileSystem,
             () => context.State.WorkingDirectory,
-            () => context.State.ExportedEnvironment());
-
-        foreach (var (name, module) in _options.AdditionalModules)
-        {
-            runner.Modules[name] = module;
-        }
-
-        runner.Libraries.AddRange(_options.Libraries);
-
-        foreach (var (name, function) in _options.ExternalFunctions)
-        {
-            runner.ExternalFunctions[name] = function;
-        }
-
-        foreach (var (name, function) in _options.HostFunctions)
-        {
-            runner.HostFunctions[name] = function;
-        }
+            () => context.State.ExportedEnvironment()));
 
         // `sys.argv` is the invocation as written, so `python script.py --flag value` reads
         // its own options the way a script assumes it can.
@@ -267,6 +243,60 @@ public sealed record PythonOptions
     /// </remarks>
     public Dictionary<string, Func<PythonHostContext, PyObject[], PyObject>> HostFunctions { get; init; } =
         new(StringComparer.Ordinal);
+
+    /// <summary>Builds a runner configured from these options, over <paramref name="fileSystem"/>.</summary>
+    public PythonRunner CreateRunner(IPyFileSystem? fileSystem)
+    {
+        var runner = new PythonRunner(new PythonLimits
+        {
+            MaxInstructions = MaxInstructions,
+            MaxRecursionDepth = MaxRecursionDepth,
+            MaxDirectoryDepth = MaxDirectoryDepth,
+        })
+        {
+            FileSystem = fileSystem,
+        };
+
+        foreach (var (name, module) in AdditionalModules)
+        {
+            runner.Modules[name] = module;
+        }
+
+        runner.Libraries.AddRange(Libraries);
+
+        foreach (var (name, function) in ExternalFunctions)
+        {
+            runner.ExternalFunctions[name] = function;
+        }
+
+        foreach (var (name, function) in HostFunctions)
+        {
+            runner.HostFunctions[name] = function;
+        }
+
+        return runner;
+    }
+
+    /// <summary>
+    /// Opens a notebook-style session — cells sharing one namespace — over a virtual
+    /// filesystem, typically the one a <c>Bash</c> instance uses, so a notebook and the shell
+    /// see the same files.
+    /// </summary>
+    /// <param name="fileSystem">The virtual filesystem.</param>
+    /// <param name="workingDirectory">Where relative paths resolve.</param>
+    /// <param name="environment">What <c>os.environ</c> holds.</param>
+    public PythonSession StartSession(
+        IFileSystem fileSystem,
+        string workingDirectory = "/",
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+
+        var cwd = VPath.Parse(workingDirectory);
+        var variables = environment ?? new Dictionary<string, string>(StringComparer.Ordinal);
+
+        return CreateRunner(new ShellFileSystem(fileSystem, () => cwd, () => variables)).StartSession();
+    }
 }
 
 /// <summary>Convenience entry point for a session with both interpreters.</summary>

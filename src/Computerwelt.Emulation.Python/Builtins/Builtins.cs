@@ -21,14 +21,25 @@ public static class BuiltinNamespace
         (PyType left, PyType right) => ReferenceEquals(left, right)
             || (ReferenceEquals(left, TypeRegistry.Bool) && ReferenceEquals(right, TypeRegistry.Int))
             || ReferenceEquals(right, TypeRegistry.Object),
-        (PyClass left, PyClass right) => ReferenceEquals(left, right),
+        (PyClass left, PyClass right) => left.IsSubclassOf(right),
+        (PyClass left, PyExceptionType right) => left.ExceptionType?.IsSubclassOf(right) == true,
+        (PyClass left, PyType right) => ReferenceEquals(right, TypeRegistry.Object)
+            || (left.BuiltinBase is { } builtin && IsSubclass(builtin, right)),
+        (PyExceptionType, PyType right) => ReferenceEquals(right, TypeRegistry.Object),
+        (PyExceptionType, PyClass) => false,
+        (PyType, PyClass) => false,
+        (PyNamedTupleType, PyType right) => ReferenceEquals(right, TypeRegistry.Tuple) || ReferenceEquals(right, TypeRegistry.Object),
+        (_, PyType or PyClass or PyExceptionType or PyNamedTupleType) when candidate is not (PyType or PyClass or PyExceptionType or PyNamedTupleType or Modules.DatetimeModule.IPyClassLike) =>
+            throw new PyRaise(PyErrors.TypeError("issubclass() arg 1 must be a class")),
         _ => false,
     };
 
     /// <summary>Creates the builtin namespace for a machine.</summary>
-    public static PyDict Create(VirtualMachine machine)
+    public static PyDict Create(VirtualMachine machine) => Populate(machine, new PyDict());
+
+    /// <summary>Fills <paramref name="builtins"/> — the machine's own namespace, typically — with the builtins.</summary>
+    public static PyDict Populate(VirtualMachine machine, PyDict builtins)
     {
-        var builtins = new PyDict();
 
         void Define(string name, Func<PyObject[], PyDict?, PyObject> implementation) =>
             builtins.Set(new PyStr(name), new PyBuiltinFunction(name, implementation));
@@ -448,6 +459,13 @@ public static class BuiltinNamespace
                 ?? throw new PyRaise(PyErrors.TypeError("round() missing required argument 'number' (pos 1)"));
 
             var given = arguments.Length > 1 ? arguments[1] : Keyword(keywords, "ndigits");
+
+            // A host value that rounds itself (an ndarray rounds element-wise).
+            if (number is IPyOperand operand && operand.Convert("round", given is PyNone ? null : given) is { } rounded)
+            {
+                return rounded;
+            }
+
             var requested = given is null or PyNone ? BigInteger.Zero : RequireInt(given, "round");
 
             // A precision wider than any representable number saturates: asking for 10**30
@@ -478,15 +496,11 @@ public static class BuiltinNamespace
                 // digits left to lose, so the value is already its own rounding.
                 PyFloat value => given is null or PyNone
                     ? PyInt.From(new BigInteger(Math.Round(value.Value, MidpointRounding.ToEven)))
-                    : digits > 15 ? value
-                    : digits >= 0 ? new PyFloat(Math.Round(value.Value, digits, MidpointRounding.ToEven))
-                    // A float rounded away to nothing keeps its sign: -1.5 at a huge
-                    // negative precision is -0.0, not 0.0.
-                    : new PyFloat(Math.CopySign(
-                        (double)RoundToMultiple(
-                            new BigInteger(value.Value), BigInteger.Pow(10, Math.Min(-digits, 400))),
-                        value.Value)),
+                    : digits > 330 ? value
+                    : new PyFloat(RoundFloat(value.Value, digits)),
                 PyInt integer => PyInt.From(RoundToMultiple(integer.Value, BigInteger.Pow(10, -digits))),
+                // A module's number type (Decimal, Fraction) rounds itself, as `__round__` does.
+                IPyNumber hosted => hosted.Round(given is null or PyNone ? null : given),
                 var other => throw new PyRaise(PyErrors.TypeError(
                     $"type {other.TypeName} doesn't define __round__ method")),
             };
@@ -496,7 +510,7 @@ public static class BuiltinNamespace
         {
             // The pair is `//` and `%`, but a bad operand names `divmod()` rather than the
             // operator it happened to try first.
-            if (arguments[0] is not (PyInt or PyFloat) || arguments[1] is not (PyInt or PyFloat))
+            if (arguments[0] is not (PyInt or PyFloat or IPyNumber) || arguments[1] is not (PyInt or PyFloat or IPyNumber))
             {
                 throw new PyRaise(PyErrors.TypeError(
                     "unsupported operand type(s) for divmod(): "
@@ -719,6 +733,15 @@ public static class BuiltinNamespace
                     + "and no __dict__ for setting new attributes"));
         });
 
+        DefineExact("delattr", 2, static arguments =>
+        {
+            var name = Arity.AttributeName(arguments[1]);
+
+            return arguments[0].DeleteAttribute(name)
+                ? PyNone.Instance
+                : throw new PyRaise(PyErrors.AttributeError(arguments[0].TypeName, name));
+        });
+
         DefineExact("hasattr", 2, arguments =>
             PyBool.Of(Runtime.Attributes.TryGet(machine, arguments[0], Arity.AttributeName(arguments[1])) is not null));
 
@@ -726,6 +749,9 @@ public static class BuiltinNamespace
 
         DefineArity("format", 1, 2, static arguments =>
             new PyStr(StringFormatter.Format(arguments[0], arguments.Length > 1 ? arguments[1].Display() : string.Empty)));
+
+        Introspection.Register(machine, builtins);
+        DescriptorBuiltins.Register(machine, builtins);
 
         return builtins;
     }
@@ -891,6 +917,90 @@ public static class BuiltinNamespace
     /// This is what <c>round(1250, -2)</c> asks for. Doing it in floating point would lose
     /// the exactness that makes an integer round trip.
     /// </remarks>
+    /// <summary>
+    /// <c>round(x, n)</c> for a float, as CPython does it: on the exact binary value of
+    /// <paramref name="value"/>, half to even, then back to the nearest double.
+    /// </summary>
+    /// <remarks>
+    /// Rounding the double directly (<c>Math.Round</c>) treats <c>2.675</c> as a tie,
+    /// but the double nearest 2.675 is 2.67499999999999982236431605997495353221893310546875,
+    /// so CPython answers 2.67. Working on the exact rational is what gets that right.
+    /// </remarks>
+    internal static double RoundFloat(double value, int digits)
+    {
+        if (value == 0 || !double.IsFinite(value))
+        {
+            return value;
+        }
+
+        // value = mantissa * 2**exponent, exactly.
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        var exponent = (int)((bits >> 52) & 0x7FF);
+        var mantissa = new BigInteger(bits & 0xFFFFFFFFFFFFFL);
+
+        if (exponent == 0)
+        {
+            exponent = 1;
+        }
+        else
+        {
+            mantissa += BigInteger.One << 52;
+        }
+
+        exponent -= 1075;
+
+        // scaled = value * 10**digits = numerator / denominator.
+        var numerator = mantissa;
+        var denominator = BigInteger.One;
+
+        if (exponent >= 0)
+        {
+            numerator <<= exponent;
+        }
+        else
+        {
+            denominator <<= -exponent;
+        }
+
+        if (digits >= 0)
+        {
+            numerator *= BigInteger.Pow(10, digits);
+        }
+        else
+        {
+            denominator *= BigInteger.Pow(10, -digits);
+        }
+
+        var quotient = BigInteger.DivRem(numerator, denominator, out var remainder);
+        var doubled = remainder * 2;
+
+        if (doubled > denominator || (doubled == denominator && !quotient.IsEven))
+        {
+            quotient += 1;
+        }
+
+        double result;
+
+        if (quotient.IsZero)
+        {
+            result = 0;
+        }
+        else
+        {
+            var text = quotient.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "e" + (-digits).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            result = double.Parse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (double.IsInfinity(result))
+        {
+            throw new PyRaise(new PyException(PyExceptionType.OverflowError, "rounded value too large to represent"));
+        }
+
+        // A value rounded away to nothing keeps its sign: -0.4 to 0 digits is -0.0.
+        return Math.CopySign(result, value);
+    }
+
     private static BigInteger RoundToMultiple(BigInteger value, BigInteger multiple)
     {
         var quotient = BigInteger.DivRem(value, multiple, out var remainder);
@@ -1074,6 +1184,12 @@ public static class Conversions
             case PyStr text:
                 return ParseInt(text.Value, false, radix, text);
 
+            case IPyOperand operand when given is null && operand.Convert("int", null) is { } converted:
+                return converted;
+            // A module's number type (Decimal, Fraction) truncates itself.
+            case IPyNumber number:
+                return PyInt.From(number.Truncate());
+
             default:
                 throw new PyRaise(PyErrors.TypeError(
                     $"int() argument must be a string, a bytes-like object or a real number, not '{arguments[0].TypeName}'"));
@@ -1246,6 +1362,13 @@ public static class Conversions
 
                 throw new PyRaise(PyErrors.ValueError($"could not convert string to float: {text.Repr()}"));
             }
+
+            // A host value with conversions of its own (a one-element ndarray).
+            case IPyOperand operand when operand.Convert("float", null) is { } converted:
+                return converted;
+            // A module's number type (Decimal, Fraction) converts itself.
+            case IPyNumber number:
+                return new PyFloat(number.ToDouble());
 
             default:
                 throw new PyRaise(PyErrors.TypeError(
