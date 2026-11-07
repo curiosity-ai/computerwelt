@@ -25,6 +25,13 @@ public static class Attributes
             return method;
         }
 
+        // `__getattr__` is the last resort of an attribute access, after everything else
+        // has failed — and is allowed to raise its own AttributeError.
+        if (target is PyInstance instance && instance.FallbackAttribute(name) is { } computed)
+        {
+            return computed;
+        }
+
         // A class reports itself by name — `type object 'bytes'` — rather than as an
         // instance of `type`, which would name every class the same way.
         throw new PyRaise(target is PyCallable { TypeName: "type" } type
@@ -35,6 +42,25 @@ public static class Attributes
     }
 
     /// <summary>Reads an attribute, returning null instead of raising.</summary>
-    public static PyObject? TryGet(VirtualMachine machine, PyObject target, string name) =>
-        target.GetAttribute(name) ?? BuiltinMethods.TryBind(machine, target, name);
+    public static PyObject? TryGet(VirtualMachine machine, PyObject target, string name)
+    {
+        if ((target.GetAttribute(name) ?? BuiltinMethods.TryBind(machine, target, name)) is { } found)
+        {
+            return found;
+        }
+
+        if (target is not PyInstance instance)
+        {
+            return null;
+        }
+
+        try
+        {
+            return instance.FallbackAttribute(name);
+        }
+        catch (PyRaise raise) when (raise.Exception.IsInstanceOf(PyExceptionType.AttributeError))
+        {
+            return null;
+        }
+    }
 }

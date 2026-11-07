@@ -21,7 +21,16 @@ public static class BuiltinNamespace
         (PyType left, PyType right) => ReferenceEquals(left, right)
             || (ReferenceEquals(left, TypeRegistry.Bool) && ReferenceEquals(right, TypeRegistry.Int))
             || ReferenceEquals(right, TypeRegistry.Object),
-        (PyClass left, PyClass right) => ReferenceEquals(left, right),
+        (PyClass left, PyClass right) => left.IsSubclassOf(right),
+        (PyClass left, PyExceptionType right) => left.ExceptionType?.IsSubclassOf(right) == true,
+        (PyClass left, PyType right) => ReferenceEquals(right, TypeRegistry.Object)
+            || (left.BuiltinBase is { } builtin && IsSubclass(builtin, right)),
+        (PyExceptionType, PyType right) => ReferenceEquals(right, TypeRegistry.Object),
+        (PyExceptionType, PyClass) => false,
+        (PyType, PyClass) => false,
+        (PyNamedTupleType, PyType right) => ReferenceEquals(right, TypeRegistry.Tuple) || ReferenceEquals(right, TypeRegistry.Object),
+        (_, PyType or PyClass or PyExceptionType or PyNamedTupleType) when candidate is not (PyType or PyClass or PyExceptionType or PyNamedTupleType or Modules.DatetimeModule.IPyClassLike) =>
+            throw new PyRaise(PyErrors.TypeError("issubclass() arg 1 must be a class")),
         _ => false,
     };
 
@@ -719,6 +728,15 @@ public static class BuiltinNamespace
                     + "and no __dict__ for setting new attributes"));
         });
 
+        DefineExact("delattr", 2, static arguments =>
+        {
+            var name = Arity.AttributeName(arguments[1]);
+
+            return arguments[0].DeleteAttribute(name)
+                ? PyNone.Instance
+                : throw new PyRaise(PyErrors.AttributeError(arguments[0].TypeName, name));
+        });
+
         DefineExact("hasattr", 2, arguments =>
             PyBool.Of(Runtime.Attributes.TryGet(machine, arguments[0], Arity.AttributeName(arguments[1])) is not null));
 
@@ -726,6 +744,9 @@ public static class BuiltinNamespace
 
         DefineArity("format", 1, 2, static arguments =>
             new PyStr(StringFormatter.Format(arguments[0], arguments.Length > 1 ? arguments[1].Display() : string.Empty)));
+
+        Introspection.Register(machine, builtins);
+        DescriptorBuiltins.Register(machine, builtins);
 
         return builtins;
     }

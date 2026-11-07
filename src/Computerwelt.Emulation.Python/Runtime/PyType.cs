@@ -158,7 +158,7 @@ public static class TypeRegistry
     /// <summary><c>type</c>.</summary>
     public static PyType Type { get; } = Define(
         "type",
-        static value => value is PyType or PyClass or PyExceptionType,
+        static value => value is PyType or PyClass or PyExceptionType or PyNamedTupleType,
         static (arguments, keywords) =>
         {
             // `type(x)` asks what something is; `type(name, bases, namespace)` makes a new
@@ -203,7 +203,10 @@ public static class TypeRegistry
                     members.Set(key, value);
                 }
 
-                return new PyClass(name, members);
+                var bases = ((PyTuple)arguments[1]).Items;
+                var machine = bases.OfType<PyClass>().Select(static b => b.Machine).FirstOrDefault(static m => m is not null);
+
+                return new PyClass(name, members, bases, machine);
             }
 
             if (arguments.Length != 1)
@@ -297,19 +300,46 @@ public static class TypeRegistry
                 $"slice expected at most 3 arguments, got {arguments.Length}")),
         });
 
-    /// <summary>
-    /// <c>property</c>.
-    /// </summary>
-    /// <remarks>
-    /// The name exists as a type object — scripts reach for it and error messages spell it —
-    /// but the descriptor itself is not implemented: <c>@property</c> is not recognised,
-    /// as upstream's `limitations/builtins.md` records.
-    /// </remarks>
+    /// <summary><c>property</c>: <c>property(fget, fset, fdel, doc)</c>, usually as a decorator.</summary>
     public static PyType Property { get; } = Define(
         "property",
-        static _ => false,
-        static (_, _) => throw new PyRaise(new PyException(
-            PyExceptionType.NotImplementedError, "property is not supported")));
+        static value => value is PyProperty,
+        static (arguments, keywords) =>
+        {
+            PyObject? Argument(int position, string name) =>
+                arguments.Length > position
+                    ? arguments[position]
+                    : keywords is not null && keywords.TryGetValue(new PyStr(name), out var value) ? value : null;
+
+            if (arguments.Length > 4)
+            {
+                throw new PyRaise(PyErrors.TypeError($"property expected at most 4 arguments, got {arguments.Length}"));
+            }
+
+            return new PyProperty(Argument(0, "fget"), Argument(1, "fset"), Argument(2, "fdel"), Argument(3, "doc"));
+        });
+
+    /// <summary><c>classmethod</c>.</summary>
+    public static PyType ClassMethod { get; } = Define(
+        "classmethod",
+        static value => value is PyClassMethod,
+        static (arguments, keywords) =>
+        {
+            PyBuiltinFunction.RejectKeywords("classmethod", keywords);
+            Arity.Exact("classmethod", arguments, 1);
+            return new PyClassMethod(arguments[0]);
+        });
+
+    /// <summary><c>staticmethod</c>.</summary>
+    public static PyType StaticMethod { get; } = Define(
+        "staticmethod",
+        static value => value is PyStaticMethod,
+        static (arguments, keywords) =>
+        {
+            PyBuiltinFunction.RejectKeywords("staticmethod", keywords);
+            Arity.Exact("staticmethod", arguments, 1);
+            return new PyStaticMethod(arguments[0]);
+        });
 
     /// <summary><c>function</c>.</summary>
     public static PyType Function { get; } = Define(
@@ -328,7 +358,7 @@ public static class TypeRegistry
     {
         // A user-defined instance reports its own class, and a class reports `type`.
         PyInstance instance => instance.Class,
-        PyException exception => exception.ExceptionType,
+        PyException exception => (PyObject?)exception.UserClass ?? exception.ExceptionType,
         PyClass or PyType or PyExceptionType => Type,
         PyBool => Bool,
         PyInt => Int,
@@ -433,7 +463,12 @@ public static class TypeRegistry
                 return value is PyException exception && exception.IsInstanceOf(exceptionType);
 
             case PyClass pyClass:
-                return value is PyInstance instance && ReferenceEquals(instance.Class, pyClass);
+                return value switch
+                {
+                    PyInstance instance => instance.Class.IsSubclassOf(pyClass),
+                    PyException raised => pyClass.ExceptionType is { } exceptionType && raised.IsInstanceOf(exceptionType),
+                    _ => false,
+                };
 
             case PyNamedTupleType namedTuple:
                 return value is PyNamedTuple named && ReferenceEquals(named.Type, namedTuple);
@@ -443,6 +478,12 @@ public static class TypeRegistry
                 if (ReferenceEquals(builtin, Int) && value is PyBool)
                 {
                     return true;
+                }
+
+                // An instance of a class extending a built-in is an instance of the built-in.
+                if (value is PyInstance { BuiltinValue: { } inner } && !ReferenceEquals(builtin, Object))
+                {
+                    return builtin.Matches(inner) && !ReferenceEquals(builtin, Bool);
                 }
 
                 return builtin.Matches(value);

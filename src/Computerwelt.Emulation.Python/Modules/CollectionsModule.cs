@@ -471,7 +471,13 @@ public static class SupportModules
             "Any", "List", "Dict", "Set", "Tuple", "Optional", "Union", "Callable",
             "Iterable", "Iterator", "Sequence", "Mapping", "TypeVar", "Generic",
             "Final", "Literal", "ClassVar", "NamedTuple", "TypedDict", "Protocol",
-            "Self", "Never", "NoReturn", "Annotated",
+            "Self", "Never", "NoReturn", "Annotated", "ParamSpec", "TypeVarTuple", "NewType",
+            "Type", "FrozenSet", "DefaultDict", "Deque", "Counter", "OrderedDict", "AbstractSet",
+            "MutableMapping", "MutableSequence", "MutableSet", "Collection", "Container", "Hashable",
+            "Sized", "Reversible", "Generator", "AsyncIterator", "AsyncIterable", "Awaitable",
+            "Coroutine", "TypeAlias", "TypeGuard", "LiteralString", "Required", "NotRequired", "Unpack",
+            "SupportsInt", "SupportsFloat", "SupportsIndex", "SupportsAbs", "SupportsRound", "IO", "TextIO",
+            "BinaryIO", "Pattern", "Match", "AnyStr", "Concatenate",
         })
         {
             module.Add(name, new TypeAlias(name));
@@ -486,6 +492,32 @@ public static class SupportModules
         // Guarded imports are for type checkers only, so this is False at runtime and the
         // block it guards never runs.
         module.Add("TYPE_CHECKING", PyBool.False);
+
+        // The run-time helpers typed code calls: all identities or no-ops, as in CPython
+        // where they exist for the type checker's benefit.
+        module.Add("cast", static arguments =>
+        {
+            Arity.Exact("cast", arguments, 2);
+            return arguments[1];
+        });
+
+        foreach (var decorator in new[] { "overload", "final", "runtime_checkable", "no_type_check", "override" })
+        {
+            module.Add(decorator, arguments =>
+            {
+                Arity.Exact(decorator, arguments, 1);
+                return arguments[0];
+            });
+        }
+
+        module.Add("get_type_hints", static arguments =>
+        {
+            Arity.Between("get_type_hints", arguments, 1, 3);
+            return arguments[0].GetAttribute("__annotations__") is PyDict hints ? hints.Copy() : new PyDict();
+        });
+
+        module.Add("assert_never", static arguments =>
+            throw new PyRaise(new PyException(PyExceptionType.AssertionError, "Expected code to be unreachable")));
 
         return module;
     }
@@ -644,6 +676,9 @@ public static class SupportModules
 /// <summary>A placeholder for a name from <c>typing</c>, which exists only to be annotated with.</summary>
 internal sealed class TypeAlias(string name) : PyObject
 {
+    /// <summary>The construct's name, without the <c>typing.</c> prefix.</summary>
+    public string Name => name;
+
     /// <inheritdoc />
     /// <remarks>
     /// CPython gives each construct its own internal type; this port uses one, so
@@ -658,7 +693,20 @@ internal sealed class TypeAlias(string name) : PyObject
     public override PyObject GetItem(PyObject index) => this;
 
     /// <inheritdoc />
-    public override PyObject? GetAttribute(string attribute) => null;
+    /// <remarks>
+    /// <c>TypeVar('T')</c>, <c>ParamSpec('P')</c> and <c>NewType('UserId', int)</c> are
+    /// called at module level by typed code. The first two only need to produce a marker;
+    /// a NewType is the identity function at run time, as in CPython.
+    /// </remarks>
+    public override PyObject? GetAttribute(string attribute) => (attribute, name) switch
+    {
+        ("__call__", "TypeVar" or "ParamSpec" or "TypeVarTuple") => new PyBuiltinFunction(name, static (arguments, _) =>
+            new TypeAlias(arguments.Length > 0 ? arguments[0].Display() : "T")),
+        ("__call__", "NewType") => new PyBuiltinFunction(name, static (arguments, _) =>
+            new PyBuiltinFunction(arguments.Length > 0 ? arguments[0].Display() : "NewType", static values => values[0])),
+        ("__name__", _) => new PyStr(name),
+        _ => null,
+    };
 }
 
 /// <summary>

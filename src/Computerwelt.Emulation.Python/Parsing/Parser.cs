@@ -737,22 +737,17 @@ public sealed class Parser
 
         var name = Advance().Text;
         var bases = new List<Expression>();
+        var keywords = new List<KeywordArgument>();
 
         if (Match("("))
         {
-            while (!Current.Is(")"))
-            {
-                bases.Add(ParseExpression());
-                if (!Match(","))
-                {
-                    break;
-                }
-            }
-
+            // The same grammar as a call: positional bases, `*bases`, and keywords such as
+            // `metaclass=` or the arguments `__init_subclass__` receives.
+            (bases, keywords) = ParseCallArguments();
             Expect(")");
         }
 
-        return At(new ClassDef(name, bases, ParseBlock(), decorators), token);
+        return At(new ClassDef(name, bases, ParseBlock(), decorators) { Keywords = keywords }, token);
     }
 
     /// <summary>

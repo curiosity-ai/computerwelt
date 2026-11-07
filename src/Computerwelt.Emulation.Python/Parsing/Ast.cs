@@ -96,14 +96,18 @@ public sealed record FunctionDef(
 
 /// <summary>A class definition.</summary>
 /// <param name="Name">The class's name.</param>
-/// <param name="Bases">Base-class expressions. Non-empty bases are rejected at runtime.</param>
+/// <param name="Bases">Base-class expressions, which may include <c>*starred</c> ones.</param>
 /// <param name="Body">The class body.</param>
 /// <param name="Decorators">Decorator expressions, outermost first.</param>
 public sealed record ClassDef(
     string Name,
     IReadOnlyList<Expression> Bases,
     IReadOnlyList<Statement> Body,
-    IReadOnlyList<Expression> Decorators) : Statement;
+    IReadOnlyList<Expression> Decorators) : Statement
+{
+    /// <summary>Class keywords: <c>metaclass=</c> and whatever <c>__init_subclass__</c> takes.</summary>
+    public IReadOnlyList<KeywordArgument> Keywords { get; init; } = [];
+}
 
 /// <summary>A formal parameter list.</summary>
 /// <param name="Parameters">Positional and keyword parameters, in order.</param>

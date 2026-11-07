@@ -25,7 +25,27 @@ public sealed class PyModuleObject : PyObject
 
     /// <inheritdoc />
     public override PyObject? GetAttribute(string name) =>
-        name == "__name__" ? new PyStr(Name) : _members.GetValueOrDefault(name);
+        name switch
+        {
+            "__name__" => new PyStr(Name),
+            "__dict__" => Namespace(),
+            _ => _members.GetValueOrDefault(name),
+        };
+
+    /// <summary>The names the module defines, as <c>dir()</c> and <c>import *</c> see them.</summary>
+    public IEnumerable<string> AttributeNames => _members.Keys;
+
+    private PyDict Namespace()
+    {
+        var dict = new PyDict();
+
+        foreach (var (key, value) in _members)
+        {
+            dict.Set(new PyStr(key), value);
+        }
+
+        return dict;
+    }
 
     /// <summary>Adds a member.</summary>
     public PyModuleObject Add(string name, PyObject value)

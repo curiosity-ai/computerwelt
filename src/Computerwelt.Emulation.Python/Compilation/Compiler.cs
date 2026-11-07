@@ -831,6 +831,19 @@ public sealed class Compiler
                 Emit(OpCode.DeleteSubscript, 0, subscript.Line);
                 break;
 
+            case Parsing.Attribute attribute:
+                CompileExpression(attribute.Value);
+                Emit(OpCode.DeleteAttr, _code.AddName(attribute.AttributeName), attribute.Line);
+                break;
+
+            case TupleExpr or ListExpr:
+                foreach (var element in target is TupleExpr tuple ? tuple.Elements : ((ListExpr)target).Elements)
+                {
+                    CompileDelete(element);
+                }
+
+                break;
+
             default:
                 throw new PythonSyntaxError("cannot delete expression", target.Line, target.Column);
         }
@@ -1389,6 +1402,26 @@ public sealed class Compiler
         }
 
         Emit(OpCode.LoadConst, _code.AddConstant(new PyStr(classDef.Name)), classDef.Line);
+
+        // The bases and keywords are evaluated before the body runs, as CPython does, and
+        // reach the class builder as a tuple and a map.
+        CompileSequence(classDef.Bases, OpCode.BuildTuple, OpCode.ListExtend, classDef.Line);
+        Emit(OpCode.BuildMap, 0, classDef.Line);
+
+        foreach (var keyword in classDef.Keywords)
+        {
+            if (keyword.Name is null)
+            {
+                CompileExpression(keyword.Value);
+                Emit(OpCode.MapMerge, 1, classDef.Line);
+                continue;
+            }
+
+            Emit(OpCode.LoadConst, _code.AddConstant(new PyStr(keyword.Name)), classDef.Line);
+            CompileExpression(keyword.Value);
+            Emit(OpCode.MapPut, 2, classDef.Line);
+        }
+
         Emit(OpCode.BuildMap, 0, classDef.Line);
         _code.NestedCode.Add(body);
         Emit(OpCode.MakeFunction, _code.NestedCode.Count - 1, classDef.Line);
@@ -1686,6 +1719,20 @@ public sealed class Compiler
 
     private void CompileCall(Call call)
     {
+        // Zero-argument `super()` is `super(__class__, <first argument>)`, where
+        // `__class__` is the class the enclosing method was defined in. The compiler is
+        // the only place that knows which parameter came first.
+        if (call is { Function: Parsing.Name { Id: "super" }, Arguments.Count: 0, Keywords.Count: 0 }
+            && _isFunctionScope && !_isClassBody
+            && FirstParameter() is { } receiver)
+        {
+            EmitLoad("super", call.Line);
+            Emit(OpCode.LoadClassCell, 0, call.Line);
+            EmitLoad(receiver, call.Line);
+            Emit(OpCode.Call, 2, call.Line);
+            return;
+        }
+
         CompileExpression(call.Function);
 
         var hasUnpacking = call.Arguments.Any(static a => a is Starred)
@@ -1736,6 +1783,34 @@ public sealed class Compiler
         }
 
         Emit(OpCode.CallKeyword, 0, call.Line);
+    }
+
+    /// <summary>
+    /// The receiver zero-argument <c>super()</c> binds to: the first parameter of the
+    /// nearest enclosing function that is not a comprehension or lambda scope of its own.
+    /// </summary>
+    private string? FirstParameter()
+    {
+        for (var scope = this; scope is not null; scope = scope._parent)
+        {
+            if (!scope._isFunctionScope || scope._isClassBody)
+            {
+                return null;
+            }
+
+            var parameters = scope._code.Parameters;
+
+            // A comprehension's implicit function takes its iterator as `.0`; it is not
+            // where `self` lives, so the search continues outward.
+            if (scope._code.Name.StartsWith('<') && scope._code.Name != "<lambda>")
+            {
+                continue;
+            }
+
+            return parameters.Parameters.Count > 0 ? parameters.Parameters[0].Name : parameters.VarArgs;
+        }
+
+        return null;
     }
 
     private void CompileLambda(Lambda lambda)

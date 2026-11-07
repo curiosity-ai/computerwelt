@@ -228,7 +228,8 @@ public sealed class VirtualMachine
                 return builtinType.Construct(arguments, keywords);
 
             case PyClass type:
-                return Instantiate(type, arguments, keywords);
+                return type.Behaviour?.Call(this, type, arguments, keywords)
+                    ?? Instantiate(type, arguments, keywords);
 
             case PyNamedTupleType namedTuple:
                 return namedTuple.Instantiate(arguments, keywords);
@@ -240,22 +241,13 @@ public sealed class VirtualMachine
                 return factory(arguments);
 
             case PyExceptionType exceptionType:
-            {
-                // A KeyError shows its key's repr rather than its text, which is what makes
-                // `KeyError('x')` print as `'x'` and a missing key visible when it is blank.
-                var single = arguments.Length > 0 ? arguments[0] : null;
+                return exceptionType.Instantiate(arguments);
 
-                // With several arguments `str(e)` is the repr of the argument tuple.
-                var message = single is null
-                    ? string.Empty
-                    : arguments.Length > 1
-                        ? new PyTuple(arguments).Repr()
-                        : ReferenceEquals(exceptionType, PyExceptionType.KeyError)
-                            ? single.Repr()
-                            : single.Display();
+            case PyMethod method:
+                return Call(method.Function, [method.Self, .. arguments], keywords);
 
-                return new PyException(exceptionType, message, arguments);
-            }
+            case PyStaticMethod staticMethod:
+                return Call(staticMethod.Function, arguments, keywords);
 
             default:
                 return CallThroughDunder(callable, arguments, keywords);
@@ -323,16 +315,89 @@ public sealed class VirtualMachine
         throw new PyRaise(PyErrors.TypeError($"'{target.TypeName}' object is not callable"));
     }
 
-    private PyObject Instantiate(PyClass type, PyObject[] arguments, PyDict? keywords)
+    /// <summary>
+    /// Calls a class: <c>__new__</c> builds the instance, then <c>__init__</c> initializes
+    /// it when <c>__new__</c> returned one of this class's own instances.
+    /// </summary>
+    internal PyObject Instantiate(PyClass type, PyObject[] arguments, PyDict? keywords, bool runInit = true)
     {
-        var instance = new PyInstance(type, this);
+        // A class built by `type(name, bases, namespace)` learns its machine on first use.
+        type.Machine ??= this;
+        RefuseAbstract(type);
 
-        switch (type.GetAttribute("__init__"))
+        PyObject instance;
+        var initializer = type.Lookup("__init__");
+
+        if (type.LookupWithOwner("__new__") is { } custom)
+        {
+            // `__new__` is a static method whether or not it was declared one.
+            var constructor = custom.Value is PyStaticMethod declared ? declared.Function : custom.Value;
+            instance = Call(constructor, [type, .. arguments], keywords);
+
+            var ours = instance switch
+            {
+                PyInstance created => created.Class.IsSubclassOf(type),
+                PyException { UserClass: { } owner } => owner.IsSubclassOf(type),
+                _ => false,
+            };
+
+            if (!ours || !runInit)
+            {
+                return instance;
+            }
+        }
+        else if (type.ExceptionType is { } exceptionType)
+        {
+            // An exception's arguments are its `args` before any `__init__` runs, as
+            // `BaseException.__new__` arranges — which is why a subclass that never calls
+            // `super().__init__` still has them.
+            var template = exceptionType.NearestBuiltin().Instantiate(
+                initializer is null && keywords is not { Count: > 0 } ? arguments : arguments);
+
+            instance = new PyException(exceptionType, template.Message, template.Arguments)
+            {
+                UserClass = type,
+                Fields = template.Fields is null ? null : new(template.Fields, StringComparer.Ordinal),
+            };
+
+            if (initializer is null)
+            {
+                if (keywords is { Count: > 0 })
+                {
+                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no keyword arguments"));
+                }
+
+                return instance;
+            }
+        }
+        else
+        {
+            // Without a user `__init__`, a mutable built-in base takes the arguments
+            // itself, as `dict.__init__` would.
+            instance = ClassModel.CreateInstance(this, type, arguments, keywords, fillMutable: initializer is null);
+
+            if (initializer is null)
+            {
+                if ((arguments.Length > 0 || keywords is { Count: > 0 }) && type.BuiltinBase is null)
+                {
+                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no arguments"));
+                }
+
+                return instance;
+            }
+        }
+
+        if (!runInit)
+        {
+            return instance;
+        }
+
+        switch (initializer)
         {
             // An initializer produces the instance by mutating it, so returning anything is
             // a mistake worth reporting rather than quietly dropping.
-            case PyFunction initializer:
-                Initialized(CallFunction(initializer.Bind(instance), arguments, keywords));
+            case PyFunction function:
+                Initialized(CallFunction(function.Bind(instance), arguments, keywords));
                 break;
 
             // A decorator such as `@dataclass` installs a builtin `__init__`, which is
@@ -344,12 +409,11 @@ public sealed class VirtualMachine
                     builtin.BindsAsMethod ? [instance, .. arguments] : arguments, keywords));
                 break;
 
-            case null:
-                if (arguments.Length > 0 || keywords is { Count: > 0 })
-                {
-                    throw new PyRaise(PyErrors.TypeError($"{type.Name}() takes no arguments"));
-                }
+            case PyClassMethod or PyStaticMethod:
+                Initialized(Call(ClassModel.BindToInstance(this, initializer, instance, type), arguments, keywords));
+                break;
 
+            case null:
                 break;
 
             // Anything else in the slot — a class, a bound method, a non-callable — is
@@ -365,6 +429,54 @@ public sealed class VirtualMachine
         }
 
         return instance;
+    }
+
+    /// <summary>
+    /// Refuses to instantiate a class that still has abstract methods, as <c>abc.ABC</c>
+    /// classes do in CPython.
+    /// </summary>
+    private static void RefuseAbstract(PyClass type)
+    {
+        if (type.Lookup("__abstractmethods__") is not PyObject marker || marker is PyNone)
+        {
+            return;
+        }
+
+        var missing = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var owner in type.Mro)
+        {
+            foreach (var (key, _) in owner.Members.Entries)
+            {
+                var name = key.Display();
+
+                if (!seen.Add(name))
+                {
+                    continue;
+                }
+
+                if (type.Lookup(name) is { } member && IsAbstract(member))
+                {
+                    missing.Add(name);
+                }
+            }
+        }
+
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        missing.Sort(StringComparer.Ordinal);
+        var plural = missing.Count == 1 ? "method" : "methods";
+
+        throw new PyRaise(PyErrors.TypeError(
+            $"Can't instantiate abstract class {type.Name} without an implementation for abstract {plural} "
+            + string.Join(", ", missing.Select(static m => $"'{m}'"))));
+
+        static bool IsAbstract(PyObject member) =>
+            member.GetAttribute("__isabstractmethod__") is { } flag && flag.IsTruthy();
     }
 
     /// <summary>Rejects an <c>__init__</c> that returned anything but None.</summary>
@@ -1648,11 +1760,34 @@ public sealed class VirtualMachine
             case OpCode.MakeClass:
             {
                 var body = (PyFunction)frame.Pop();
+                var keywords = (PyDict)frame.Pop();
+                var bases = (PyTuple)frame.Pop();
                 var name = frame.Pop().Display();
+                frame.Push(BuildClass(name, body, bases, keywords));
+                return false;
+            }
 
-                // The class body runs in its own frame; its locals become the namespace.
-                var members = RunClassBody(body);
-                frame.Push(new PyClass(name, members));
+            case OpCode.LoadClassCell:
+            {
+                if (!frame.TryGetCell("__class__", out var cell) || cell.Value is not PyClass owner)
+                {
+                    throw new PyRaise(PyErrors.RuntimeError("super(): __class__ cell not found"));
+                }
+
+                frame.Push(owner);
+                return false;
+            }
+
+            case OpCode.DeleteAttr:
+            {
+                var target = frame.Pop();
+                var name = code.Names[instruction.Operand];
+
+                if (!target.DeleteAttribute(name))
+                {
+                    throw new PyRaise(PyErrors.AttributeError(target.TypeName, name));
+                }
+
                 return false;
             }
 
@@ -1815,10 +1950,180 @@ public sealed class VirtualMachine
         }
     }
 
-    private PyDict RunClassBody(PyFunction body)
+    /// <summary>
+    /// Builds a class from its statement: resolves the bases, runs the body, and then does
+    /// what <c>type.__new__</c> does once the class exists — fill the <c>__class__</c>
+    /// cell, call <c>__set_name__</c> on descriptors and <c>__init_subclass__</c> on the
+    /// parent.
+    /// </summary>
+    private PyObject BuildClass(string name, PyFunction body, PyTuple bases, PyDict keywords)
+    {
+        var resolved = new List<PyObject>();
+        Modules.TypeAlias? special = null;
+
+        foreach (var candidate in bases.Items)
+        {
+            switch (candidate)
+            {
+                // `Generic[T]` and `Protocol` exist for type checkers; at run time they add
+                // nothing, so they are dropped from the bases as CPython's `__mro_entries__`
+                // would reduce them to `Generic`.
+                case Modules.TypeAlias alias when alias.Name is "Generic" or "Protocol":
+                    break;
+
+                case Modules.TypeAlias alias when alias.Name is "NamedTuple" or "TypedDict":
+                    special = alias;
+                    break;
+
+                case PyClass or PyType or PyExceptionType:
+                    resolved.Add(candidate);
+                    break;
+
+                default:
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"bases must be types, not {candidate.TypeName}"));
+            }
+        }
+
+        var metaclass = keywords.TryGetValue(new PyStr("metaclass"), out var declared) ? declared : null;
+
+        if (metaclass is not null)
+        {
+            keywords.Remove(new PyStr("metaclass"));
+
+            // `abc.ABCMeta` is the one metaclass a program may name: abstract-method
+            // checking is built into instantiation here, so it needs no metaclass at all.
+            if (!(metaclass is PyClass { Name: "ABCMeta" } || ReferenceEquals(metaclass, TypeRegistry.Type)))
+            {
+                throw new PyRaise(new PyException(
+                    PyExceptionType.NotImplementedError, "custom metaclasses are not supported"));
+            }
+        }
+
+        var classCell = new PyCell();
+        var members = RunClassBody(body, classCell);
+
+        if (special is not null)
+        {
+            return special.Name == "NamedTuple"
+                ? BuildNamedTuple(name, members)
+                : BuildTypedDict(name);
+        }
+
+        if (metaclass is PyClass { Name: "ABCMeta" } && !members.TryGetValue(new PyStr("__abstractmethods__"), out _))
+        {
+            members.Set(new PyStr("__abstractmethods__"), PyBool.True);
+        }
+
+        // `__new__` and `__init_subclass__` are implicitly static and class methods.
+        if (members.TryGetValue(new PyStr("__init_subclass__"), out var hook) && hook is PyFunction initSubclass)
+        {
+            members.Set(new PyStr("__init_subclass__"), new PyClassMethod(initSubclass));
+        }
+
+        if (members.TryGetValue(new PyStr("__class_getitem__"), out var getter) && getter is PyFunction classGetItem)
+        {
+            members.Set(new PyStr("__class_getitem__"), new PyClassMethod(classGetItem));
+        }
+
+        var type = new PyClass(name, members, resolved, this);
+        classCell.Value = type;
+
+        foreach (var (key, value) in members.Entries)
+        {
+            switch (value)
+            {
+                case PyProperty property:
+                    property.Name ??= key.Display();
+                    break;
+
+                case PyInstance descriptor when descriptor.Dunder("__set_name__") is { } setName:
+                    descriptor.Invoke(setName, [type, key]);
+                    break;
+            }
+        }
+
+        type.Behaviour?.Created(this, type, keywords);
+
+        // The parent's hook, not the new class's own: it is how a base registers or
+        // validates its subclasses.
+        if (type.Mro.Count > 1)
+        {
+            var parentHook = new PySuper(this, type, type).GetAttribute("__init_subclass__");
+
+            if (parentHook is not null)
+            {
+                Call(parentHook, [], keywords.Count > 0 ? keywords : null);
+            }
+            else if (keywords.Count > 0)
+            {
+                throw new PyRaise(PyErrors.TypeError($"{name}.__init_subclass__() takes no keyword arguments"));
+            }
+        }
+        else if (keywords.Count > 0)
+        {
+            throw new PyRaise(PyErrors.TypeError($"{name}.__init_subclass__() takes no keyword arguments"));
+        }
+
+        return type;
+    }
+
+    /// <summary><c>class P(NamedTuple)</c>: the annotations are the fields, assignments their defaults.</summary>
+    private static PyObject BuildNamedTuple(string name, PyDict members)
+    {
+        var fields = new List<string>();
+        var defaults = new List<PyObject>();
+
+        if (members.TryGetValue(new PyStr("__annotations__"), out var annotations) && annotations is PyDict declared)
+        {
+            foreach (var (key, _) in declared.Entries)
+            {
+                var field = key.Display();
+                fields.Add(field);
+
+                if (members.TryGetValue(key, out var value))
+                {
+                    defaults.Add(value);
+                }
+                else if (defaults.Count > 0)
+                {
+                    throw new PyRaise(PyErrors.TypeError(
+                        $"Non-default namedtuple field {field} cannot follow default field"));
+                }
+            }
+        }
+
+        var type = new PyNamedTupleType(name, fields, defaults);
+
+        // Methods and class attributes in the body travel with the type.
+        foreach (var (key, value) in members.Entries)
+        {
+            var member = key.Display();
+
+            if (!fields.Contains(member) && member is not "__annotations__" and not "__module__" and not "__qualname__")
+            {
+                type.Methods[member] = value;
+            }
+        }
+
+        return type;
+    }
+
+    /// <summary><c>class Movie(TypedDict)</c>: calling it builds a plain dict, as CPython's does.</summary>
+    private static PyObject BuildTypedDict(string name) =>
+        new PyType(name, static value => value is PyDict, static (arguments, keywords) =>
+            TypeRegistry.Dict.Construct(arguments, keywords));
+
+    private PyDict RunClassBody(PyFunction body, PyCell classCell)
     {
         var locals = new PyObject?[body.Code.LocalNames.Count];
-        var frame = new Frame(body.Code, body.Globals, locals, new Dictionary<string, PyCell>(body.Closure, StringComparer.Ordinal));
+        var cells = new Dictionary<string, PyCell>(body.Closure, StringComparer.Ordinal)
+        {
+            // The implicit cell zero-argument `super()` reads; filled once the class exists.
+            ["__class__"] = classCell,
+        };
+
+        var frame = new Frame(body.Code, body.Globals, locals, cells);
 
         Execute(frame);
 
@@ -1878,8 +2183,9 @@ public sealed class VirtualMachine
     {
         PyExceptionType type => actual.IsInstanceOf(type),
 
-        // A user class cannot be an exception type here, but it is at least a class; a
-        // value that is not a class at all is a mistake worth naming.
+        // A Python class is an exception type when it derives from one; any other class is
+        // at least a class, and simply never matches.
+        PyClass { ExceptionType: { } type } => actual.IsInstanceOf(type),
         PyClass => false,
         _ => throw new PyRaise(PyErrors.TypeError(
             "catching classes that do not inherit from BaseException is not allowed")),
@@ -1916,6 +2222,8 @@ public sealed class VirtualMachine
     {
         PyException exception => exception,
         PyExceptionType type => new PyException(type, string.Empty),
+        PyClass { ExceptionType: not null } type => Call(type, []) as PyException
+            ?? throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
         _ => throw new PyRaise(PyErrors.TypeError("exceptions must derive from BaseException")),
     };
 

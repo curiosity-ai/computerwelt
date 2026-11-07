@@ -65,6 +65,15 @@ public enum OpCode
     /// <summary>Pop a value and an object; set the object's attribute.</summary>
     StoreAttr,
 
+    /// <summary>Pop an object; delete the attribute named by the operand (<c>del obj.x</c>).</summary>
+    DeleteAttr,
+
+    /// <summary>
+    /// Push the class a method was defined in — the implicit <c>__class__</c> cell that
+    /// zero-argument <c>super()</c> reads.
+    /// </summary>
+    LoadClassCell,
+
     /// <summary>Pop an index and an object; push the indexed value.</summary>
     LoadSubscript,
 
@@ -192,7 +201,10 @@ public enum OpCode
     /// <summary>Build a function from the code object named by the operand.</summary>
     MakeFunction,
 
-    /// <summary>Build a class from a name and a body function.</summary>
+    /// <summary>
+    /// Build a class. Pops the body function, the keyword map, the base tuple and the
+    /// name, in that order.
+    /// </summary>
     MakeClass,
 
     /// <summary>Raise; the operand says how many values were supplied.</summary>
