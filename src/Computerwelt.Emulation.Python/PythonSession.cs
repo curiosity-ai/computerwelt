@@ -74,6 +74,10 @@ public sealed class PythonSession : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(source);
 
+        // The whole cell — running it and formatting what it produced — happens with this
+        // machine as the running one, so host types that call back into Python find it.
+        using var running = _machine.Enter();
+
         var number = ++ExecutionCount;
         var fileName = $"<cell {number}>";
 

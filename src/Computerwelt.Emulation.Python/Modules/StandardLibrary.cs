@@ -57,6 +57,9 @@ public static class StandardLibrary
         // is a perfectly ordinary use of it.
         modules["fnmatch"] = FnmatchModule.Create();
 
+        // pandas reads and writes through the same filesystem as `open`, and without one
+        // still works in memory (and over `io.StringIO`), so it is present either way.
+
         if (fileSystem is not null)
         {
             var os = OsModule.Create(fileSystem, machine);
@@ -97,7 +100,7 @@ public static class StandardLibrary
     /// should not pay for it. Its submodules are attributes of the one package object, so
     /// <c>import numpy.linalg</c> and <c>np.linalg</c> are the same module within a run.
     /// </remarks>
-    public static PyObject? CreateOnDemand(VirtualMachine machine, string name)
+    public static PyObject? CreateOnDemand(VirtualMachine machine, string name, IPyFileSystem? fileSystem = null)
     {
         ArgumentNullException.ThrowIfNull(machine);
 
@@ -110,6 +113,7 @@ public static class StandardLibrary
             "abc" => AbcModule.Create(machine),
             "collections.abc" => AbcModule.CreateCollectionsAbc(),
             "traceback" => TracebackModule.Create(machine),
+            "pandas" => Pandas.PdModule.Create(machine, fileSystem),
             _ => null,
         };
 

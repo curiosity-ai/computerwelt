@@ -300,7 +300,7 @@ public sealed class PythonRunner
             // Standard modules too large to build for every run (`numpy`) come last, built on
             // first import like a library.
             return library?.Create(new PythonHostContext(name, machine, FileSystem, timeProvider))
-                ?? Computerwelt.Emulation.Python.Modules.StandardLibrary.CreateOnDemand(machine, name);
+                ?? Computerwelt.Emulation.Python.Modules.StandardLibrary.CreateOnDemand(machine, name, FileSystem);
         };
     }
 

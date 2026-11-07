@@ -214,8 +214,37 @@ public sealed class VirtualMachine
     {
         ArgumentNullException.ThrowIfNull(globals);
 
+        using var scope = Enter();
         var frame = new Frame(code, globals, [], null);
         return Execute(frame);
+    }
+
+    [ThreadStatic]
+    private static VirtualMachine? s_running;
+
+    /// <summary>
+    /// The machine running on this thread right now, or null between runs.
+    /// </summary>
+    /// <remarks>
+    /// For host types that hold no reference to the machine that made them but must call
+    /// back into it — a pandas Series applying a lambda. It is set for exactly the span of
+    /// a run (<see cref="RunModule(CodeObject, PyDict)"/>, and whatever a host wraps in
+    /// <see cref="Enter"/>), so a session whose cells run on different threads finds the
+    /// right machine in each, and a thread reused by another tenant never sees this one.
+    /// </remarks>
+    public static VirtualMachine? Running => s_running;
+
+    /// <summary>Makes this the running machine on this thread until the scope is disposed.</summary>
+    public IDisposable Enter()
+    {
+        var previous = s_running;
+        s_running = this;
+        return new RunningScope(previous);
+    }
+
+    private sealed class RunningScope(VirtualMachine? previous) : IDisposable
+    {
+        public void Dispose() => s_running = previous;
     }
 
     /// <summary>

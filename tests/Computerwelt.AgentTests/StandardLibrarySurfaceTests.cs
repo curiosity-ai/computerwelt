@@ -20,9 +20,9 @@ namespace Computerwelt.AgentTests;
 /// </para>
 /// <para>
 /// Several entries in <see cref="Available"/> are extensions rather than ports —
-/// <c>glob</c>, <c>fnmatch</c> and <c>io</c> do not exist upstream at all, and <c>numpy</c>
-/// (with <c>numpy.linalg</c> and <c>numpy.random</c>) is a managed subset built on first
-/// import. What each one promises is pinned by a fixture in <c>tests/monty-extensions/</c>.
+/// <c>glob</c>, <c>fnmatch</c>, <c>io</c>, <c>numpy</c> and <c>pandas</c> do not exist upstream
+/// at all; numpy and pandas are managed subsets built on first import. What each one
+/// promises is pinned by a fixture in <c>tests/monty-extensions/</c>.
 /// </para>
 /// </remarks>
 public sealed class StandardLibrarySurfaceTests
@@ -71,6 +71,7 @@ public sealed class StandardLibrarySurfaceTests
         "operator",
         "os",
         "os.path",
+        "pandas",
         "pathlib",
         "posixpath",
         "pprint",

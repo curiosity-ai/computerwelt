@@ -250,4 +250,25 @@ public sealed class SessionTests
 
         Assert.Equal(["released"], log);
     }
+
+    [Fact]
+    public async Task Pandas_follows_its_session_across_threads_and_never_into_another()
+    {
+        using var first = new PythonRunner().StartSession();
+        using var second = new PythonRunner().StartSession();
+
+        // Each cell on a fresh thread-pool thread, the two tenants interleaved: a callback a
+        // frame runs must reach its own session's machine whichever thread the cell is on.
+        await Task.Run(() => first.Run("import pandas as pd\nscale = 10\ndf = pd.DataFrame({'a': [1, 2]})"));
+        await Task.Run(() => second.Run("import pandas as pd\nscale = 1000\ndf = pd.DataFrame({'a': [1, 2]})"));
+
+        var a = await Task.Run(() => first.Run("df['a'].apply(lambda v: v * scale).tolist()"));
+        var b = await Task.Run(() => second.Run("df['a'].apply(lambda v: v * scale).tolist()"));
+
+        Assert.Equal("[10, 20]", a.Outputs[0].Text);
+        Assert.Equal("[1000, 2000]", b.Outputs[0].Text);
+
+        var html = await Task.Run(() => first.Run("df"));
+        Assert.Contains("<table", html.Outputs[0].Data["text/html"], StringComparison.Ordinal);
+    }
 }

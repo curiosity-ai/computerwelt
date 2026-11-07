@@ -29,7 +29,7 @@ public interface IPyOperand
     PyObject? Binary(string op, PyObject other, bool reflected);
 
     /// <summary>An augmented assignment (<c>+=</c> …), given the plain operator. Null to fall back to <see cref="Binary"/>.</summary>
-    PyObject? InPlace(string op, PyObject other);
+    PyObject? InPlace(string op, PyObject other) => null;
 
     /// <summary>A unary operator: <c>-</c>, <c>+</c>, <c>~</c>, or <c>abs</c> for the builtin.</summary>
     PyObject? Unary(string op);
@@ -43,5 +43,5 @@ public interface IPyOperand
     /// A conversion builtin applied to this value: <c>float</c>, <c>int</c> or <c>round</c>
     /// (whose <paramref name="argument"/> is <c>ndigits</c>, or null when omitted).
     /// </summary>
-    PyObject? Convert(string conversion, PyObject? argument);
+    PyObject? Convert(string conversion, PyObject? argument) => null;
 }
