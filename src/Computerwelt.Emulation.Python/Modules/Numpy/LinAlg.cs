@@ -1,3 +1,6 @@
+using System.Numerics.Tensors;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Computerwelt.Emulation.Python.Runtime;
 
 namespace Computerwelt.Emulation.Python.Modules.Numpy;
@@ -11,7 +14,7 @@ namespace Computerwelt.Emulation.Python.Modules.Numpy;
 /// to rounding, not bit for bit, and an eigenvector's sign — which LAPACK leaves to its
 /// implementation — may differ.
 /// </remarks>
-internal static class LinAlg
+internal static partial class LinAlg
 {
     /// <summary><c>numpy.linalg.LinAlgError</c>, a <c>ValueError</c>.</summary>
     public static PyExceptionType LinAlgError { get; } =
@@ -33,6 +36,11 @@ internal static class LinAlg
     {
         NdArray.CheckedSize(shape);
         NdArray.CheckWork((double)p * k * q, "this matrix product");
+
+        if (UsesKernel(p, k, q))
+        {
+            return Kernel(a, b, p, k, q, kind, shape);
+        }
 
         if (kind == DKind.Float)
         {
@@ -84,6 +92,27 @@ internal static class LinAlg
         return kind == DKind.Bool ? product.AsType(NdDType.Bool) : product;
     }
 
+    /// <summary>A large product through the blocked kernels.</summary>
+    private static NdArray Kernel(NdArray a, NdArray b, int p, int k, int q, DKind kind, int[] shape)
+    {
+        if (kind == DKind.Float)
+        {
+            var result = GC.AllocateUninitializedArray<double>(p * q);
+            Gemm(ContiguousDoubles(a), ContiguousDoubles(b), result, p, k, q);
+            return NdArray.FromDoubles(result, shape);
+        }
+
+        var longs = GC.AllocateUninitializedArray<long>(p * q);
+        Gemm(a.Kind == DKind.Int && a.IsContiguous ? a.Buffer.I.AsSpan(a.Offset, a.Size) : a.ToLongs(),
+            b.Kind == DKind.Int && b.IsContiguous ? b.Buffer.I.AsSpan(b.Offset, b.Size) : b.ToLongs(),
+            longs, p, k, q);
+        var product = NdArray.FromLongs(longs, shape);
+        return kind == DKind.Bool ? product.AsType(NdDType.Bool) : product;
+    }
+
+    private static ReadOnlySpan<double> ContiguousDoubles(NdArray array) =>
+        array.Kind == DKind.Float && array.IsContiguous ? array.Buffer.F.AsSpan(array.Offset, array.Size) : array.ToDoubles();
+
     /// <summary><c>a @ b</c>, with numpy's rules for vectors and stacks of matrices.</summary>
     public static PyObject MatMul(NdArray a, NdArray b)
     {
@@ -128,6 +157,14 @@ internal static class LinAlg
 
         NdArray.CheckedSize([batches, n, m]);
         NdArray.CheckWork((double)batches * n * k * m, "this matrix product");
+
+        // One matrix: its product is the result, without copying it into a stack of one.
+        if (batches == 1)
+        {
+            var single = Multiply(leftAll.Reshape([n, k]), rightAll.Reshape([k, m]), n, k, m, kind, [n, m]);
+            return NdConvert.Wrap(single.Reshape([.. outShape]));
+        }
+
         var result = NdArray.Zeros([batches, n, m], NdDType.Of(kind == DKind.Bool ? DKind.Bool : kind));
 
         for (var i = 0; i < batches; i++)
@@ -273,15 +310,17 @@ internal static class LinAlg
                 sign = -sign;
             }
 
+            // Each row update is `row -= factor * pivot row`, element for element the same
+            // operation as a scalar loop, so the vectorised form rounds identically.
+            var flat = Flat(lu);
+            var pivot = flat.Slice((column * n) + column + 1, n - column - 1);
+
             for (var row = column + 1; row < n; row++)
             {
                 var factor = lu[row, column] / lu[column, column];
                 lu[row, column] = factor;
-
-                for (var j = column + 1; j < n; j++)
-                {
-                    lu[row, j] -= factor * lu[column, j];
-                }
+                var target = flat.Slice((row * n) + column + 1, n - column - 1);
+                TensorPrimitives.MultiplyAdd(pivot, -factor, target, target);
             }
         }
 
@@ -328,40 +367,44 @@ internal static class LinAlg
             throw Error("Singular matrix");
         }
 
+        // Both substitutions run on whole rows of the right-hand side at once. Each element
+        // still sees `total -= lu[i, j] * y[j]` for j in ascending order, the scalar loop's
+        // sequence of roundings, so the result is unchanged.
         var columns = b.GetLength(1);
         var x = new double[n, columns];
+        var rows = Flat(x);
+        var source = Flat(b);
+        var factors = Flat(lu);
 
-        for (var c = 0; c < columns; c++)
+        for (var i = 0; i < n; i++)
         {
-            var y = new double[n];
+            var target = rows.Slice(i * columns, columns);
+            source.Slice(pivots[i] * columns, columns).CopyTo(target);
 
-            for (var i = 0; i < n; i++)
+            for (var j = 0; j < i; j++)
             {
-                var total = b[pivots[i], c];
+                TensorPrimitives.MultiplyAdd(rows.Slice(j * columns, columns), -factors[(i * n) + j], target, target);
+            }
+        }
 
-                for (var j = 0; j < i; j++)
-                {
-                    total -= lu[i, j] * y[j];
-                }
+        for (var i = n - 1; i >= 0; i--)
+        {
+            var target = rows.Slice(i * columns, columns);
 
-                y[i] = total;
+            for (var j = i + 1; j < n; j++)
+            {
+                TensorPrimitives.MultiplyAdd(rows.Slice(j * columns, columns), -factors[(i * n) + j], target, target);
             }
 
-            for (var i = n - 1; i >= 0; i--)
-            {
-                var total = y[i];
-
-                for (var j = i + 1; j < n; j++)
-                {
-                    total -= lu[i, j] * x[j, c];
-                }
-
-                x[i, c] = total / lu[i, i];
-            }
+            TensorPrimitives.Divide(target, factors[(i * n) + i], target);
         }
 
         return x;
     }
+
+    /// <summary>A rectangular array's elements as one row-major span.</summary>
+    private static Span<double> Flat(double[,] matrix) =>
+        MemoryMarshal.CreateSpan(ref Unsafe.As<byte, double>(ref MemoryMarshal.GetArrayDataReference(matrix)), matrix.Length);
 
     public static PyObject Inv(PyObject value)
     {

@@ -111,6 +111,11 @@ internal static partial class Reductions
     /// <summary><c>sum</c> over contiguous float/int data, whole or along leading axes, or null.</summary>
     private static PyObject? TrySumFast(NdArray array, int[]? axes, bool keepDims, NdDType? dtype)
     {
+        if (dtype is null && array.Kind == DKind.Bool && Whole(array, axes) && NdSimd.CountNonZero(array) is >= 0 and var trues)
+        {
+            return Scalar(array, trues, keepDims);
+        }
+
         if (dtype is not null || !Large(array) || array.Kind is not (DKind.Float or DKind.Int))
         {
             return null;

@@ -539,6 +539,11 @@ internal static partial class Reductions
 
     public static PyObject CountNonZero(NdArray array, int[]? axes, bool keepDims)
     {
+        if (Whole(array, axes) && NdSimd.CountNonZero(array) is >= 0 and var count)
+        {
+            return Scalar(array, count, keepDims);
+        }
+
         var groups = Group(array, axes);
         var values = groups.Data.ToBools();
         var g = groups.GroupSize;

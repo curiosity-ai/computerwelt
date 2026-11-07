@@ -15,21 +15,22 @@ namespace Computerwelt.Emulation.Python.Modules.Numpy;
 /// run of the result's shape — or a single scalar broadcast over it — is handed to
 /// <see cref="TensorPrimitives"/>, which processes it with SIMD instructions (AVX2/AVX-512
 /// on x64, AdvSimd on Arm), or to a <see cref="Vector256{T}"/> loop where no primitive
-/// exists. Anything else — strided views, broadcasting that is not a scalar, object and
-/// string dtypes, the operators with Python semantics such as <c>//</c> and <c>%</c> —
-/// returns null and takes the general path, which stays the reference.
+/// exists. <c>//</c>, <c>%</c> and <c>fmod</c> have no vector form that keeps Python's
+/// sign rules, so they get typed loops over the exact scalar rule instead. Anything else —
+/// strided views, broadcasting that is not a scalar, object and string dtypes — returns
+/// null and takes the general path, which stays the reference.
 /// </para>
 /// <para>
 /// Accuracy: addition, subtraction, multiplication, division, comparisons, min/max and
 /// square roots are exact IEEE operations either way. Transcendental functions
-/// (<c>exp</c>, <c>sin</c>, <c>log</c>, <c>power</c>, …) use vectorised implementations
+/// (<c>exp</c>, <c>sin</c>, <c>log</c>, …) use vectorised implementations
 /// that may differ from the scalar <see cref="Math"/> result in the last bit or two, and a
 /// vectorised sum adds in a different order than numpy's pairwise sum, so totals can differ
 /// in the last digits. Arrays smaller than <see cref="Threshold"/> elements take the exact
 /// path, so small results — the ones a program prints — are unchanged.
 /// </para>
 /// </remarks>
-internal static class NdSimd
+internal static partial class NdSimd
 {
     /// <summary>The fewest elements a fast path is used for.</summary>
     public const int Threshold = 64;
@@ -58,6 +59,9 @@ internal static class NdSimd
         public bool IsScalar { get; }
 
         public T Scalar { get; }
+
+        /// <summary>The value at <paramref name="i"/> — the scalar wherever it is broadcast.</summary>
+        public T this[int i] => IsScalar ? Scalar : Span[i];
     }
 
     private static bool Covers(NdArray array, int[] shape) =>
@@ -124,7 +128,10 @@ internal static class NdSimd
 
         if (xk == DKind.Int && yk == DKind.Int)
         {
-            return IntBinary(name, x, y, shape, n);
+            // Division and the other float-valued functions of two ints are float loops.
+            return name is "true_divide" or "divide" or "arctan2" or "hypot" or "copysign" or "float_power"
+                ? FloatBinary(name, x, y, shape, n)
+                : IntBinary(name, x, y, shape, n);
         }
 
         return FloatBinary(name, x, y, shape, n);
@@ -133,7 +140,8 @@ internal static class NdSimd
     private static NdArray? FloatBinary(string name, NdArray x, NdArray y, int[] shape, int n)
     {
         if (name is not ("add" or "subtract" or "multiply" or "true_divide" or "divide" or "maximum" or "minimum"
-            or "fmax" or "fmin" or "power" or "float_power" or "arctan2" or "hypot" or "copysign"))
+            or "fmax" or "fmin" or "power" or "float_power" or "arctan2" or "hypot" or "copysign"
+            or "floor_divide" or "remainder" or "mod" or "fmod"))
         {
             return null;
         }
@@ -145,7 +153,7 @@ internal static class NdSimd
         {
             var a = AsDoubles(x, ref xScratch);
             var b = AsDoubles(y, ref yScratch);
-            var result = new double[n];
+            var result = GC.AllocateUninitializedArray<double>(n);
             Apply(name, a, b, result);
             return NdArray.FromDoubles(result, shape);
         }
@@ -220,8 +228,7 @@ internal static class NdSimd
 
             case "power" or "float_power":
                 if (a.IsScalar) TensorPrimitives.Pow(a.Scalar, b.Span, d);
-                else if (b.IsScalar && b.Scalar == 2.0) TensorPrimitives.Multiply(a.Span, a.Span, d);
-                else if (b.IsScalar) TensorPrimitives.Pow(a.Span, b.Scalar, d);
+                else if (b.IsScalar) PowerOfScalar(a.Span, b.Scalar, d);
                 else TensorPrimitives.Pow(a.Span, b.Span, d);
                 return;
 
@@ -231,6 +238,21 @@ internal static class NdSimd
                 else TensorPrimitives.Atan2(a.Span, b.Span, d);
                 return;
 
+            // Python's floor division and remainder have no vector form that keeps their
+            // sign and rounding rules, so these are typed loops over the exact scalar rule —
+            // still a long way from the general loop's per-element dispatch.
+            case "floor_divide":
+                for (var i = 0; i < d.Length; i++) d[i] = Ufuncs.DivMod(a[i], b[i]).Floor;
+                return;
+
+            case "remainder" or "mod":
+                for (var i = 0; i < d.Length; i++) d[i] = Ufuncs.DivMod(a[i], b[i]).Mod;
+                return;
+
+            case "fmod":
+                for (var i = 0; i < d.Length; i++) d[i] = a[i] % b[i];
+                return;
+
             case "hypot":
                 Fill(a, b, d, static (x, y, r) => TensorPrimitives.Hypot(x, y, r));
                 return;
@@ -238,6 +260,27 @@ internal static class NdSimd
             default:
                 Fill(a, b, d, static (x, y, r) => TensorPrimitives.CopySign(x, y, r));
                 return;
+        }
+    }
+
+    /// <summary>
+    /// <c>x ** y</c> for one exponent: the exponents numpy itself special-cases are a
+    /// multiply, a square root or a reciprocal; any other is the exact pow.
+    /// </summary>
+    /// <remarks>
+    /// <c>exp(y·log x)</c> through the vector exp and log was measured at about 1.8 times
+    /// faster, and rejected: it turns exact answers into near misses that print
+    /// (<c>4.0 ** 1.5</c> as <c>7.999999999999998</c>).
+    /// </remarks>
+    private static void PowerOfScalar(ReadOnlySpan<double> x, double y, Span<double> d)
+    {
+        switch (y)
+        {
+            case 2.0: TensorPrimitives.Multiply(x, x, d); return;
+            case 0.5: TensorPrimitives.Sqrt(x, d); return;
+            case 1.0: x.CopyTo(d); return;
+            case -1.0: TensorPrimitives.Divide(1.0, x, d); return;
+            default: TensorPrimitives.Pow(x, y, d); return;
         }
     }
 
@@ -272,9 +315,15 @@ internal static class NdSimd
     /// </summary>
     private static NdArray? IntBinary(string name, NdArray x, NdArray y, int[] shape, int n)
     {
+        if (name is not ("add" or "subtract" or "multiply" or "maximum" or "fmax" or "minimum" or "fmin"
+            or "bitwise_and" or "bitwise_or" or "bitwise_xor" or "floor_divide" or "remainder" or "mod" or "fmod"))
+        {
+            return null;
+        }
+
         var a = AsLongs(x);
         var b = AsLongs(y);
-        var d = new long[n];
+        var d = GC.AllocateUninitializedArray<long>(n);
 
         switch (name)
         {
@@ -290,10 +339,14 @@ internal static class NdSimd
                 else TensorPrimitives.Subtract(a.Span, b.Span, d);
                 break;
 
+            // TensorPrimitives' long-times-scalar form is several times slower than its
+            // span-span form, so the scalar case is a Vector256 loop of its own.
+            case "multiply" when a.IsScalar || b.IsScalar:
+                MultiplyByScalar(a.IsScalar ? b.Span : a.Span, a.IsScalar ? a.Scalar : b.Scalar, d);
+                break;
+
             case "multiply":
-                if (a.IsScalar) TensorPrimitives.Multiply(b.Span, a.Scalar, d);
-                else if (b.IsScalar) TensorPrimitives.Multiply(a.Span, b.Scalar, d);
-                else TensorPrimitives.Multiply(a.Span, b.Span, d);
+                TensorPrimitives.Multiply(a.Span, b.Span, d);
                 break;
 
             case "maximum" or "fmax":
@@ -320,6 +373,18 @@ internal static class NdSimd
                 else TensorPrimitives.BitwiseOr(a.Span, b.Span, d);
                 break;
 
+            case "floor_divide":
+                for (var i = 0; i < d.Length; i++) d[i] = Ufuncs.FloorDivide(a[i], b[i]);
+                break;
+
+            case "remainder" or "mod":
+                for (var i = 0; i < d.Length; i++) d[i] = Ufuncs.Remainder(a[i], b[i]);
+                break;
+
+            case "fmod":
+                for (var i = 0; i < d.Length; i++) d[i] = Ufuncs.Fmod(a[i], b[i]);
+                break;
+
             case "bitwise_xor":
                 if (a.IsScalar) TensorPrimitives.Xor(b.Span, a.Scalar, d);
                 else if (b.IsScalar) TensorPrimitives.Xor(a.Span, b.Scalar, d);
@@ -333,6 +398,27 @@ internal static class NdSimd
         return NdArray.FromLongs(d, shape);
     }
 
+    /// <summary>Wrapping int64 multiplication by one factor.</summary>
+    private static void MultiplyByScalar(ReadOnlySpan<long> values, long factor, Span<long> destination)
+    {
+        var i = 0;
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            var f = Vector256.Create(factor);
+
+            for (; i <= values.Length - Vector256<long>.Count; i += Vector256<long>.Count)
+            {
+                (Vector256.Create(values.Slice(i, Vector256<long>.Count)) * f).CopyTo(destination[i..]);
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            destination[i] = unchecked(values[i] * factor);
+        }
+    }
+
     /// <summary><c>&amp;</c>, <c>|</c>, <c>^</c> and the logical forms over bool arrays: bytes, 32 at a time.</summary>
     private static NdArray? BoolBinary(string name, NdArray x, NdArray y, int[] shape, int n)
     {
@@ -343,7 +429,7 @@ internal static class NdSimd
 
         var a = MemoryMarshal.Cast<bool, byte>(Bools(x));
         var b = MemoryMarshal.Cast<bool, byte>(Bools(y));
-        var result = new bool[n];
+        var result = GC.AllocateUninitializedArray<bool>(n);
         var d = MemoryMarshal.Cast<bool, byte>(result.AsSpan());
 
         switch (name)
@@ -368,7 +454,7 @@ internal static class NdSimd
 
     private static NdArray? Comparison(string name, NdArray x, NdArray y, int[] shape, int n)
     {
-        var result = new bool[n];
+        var result = GC.AllocateUninitializedArray<bool>(n);
 
         // Two int arrays compare as integers; anything else as doubles, as numpy's promotion does.
         if (x.Kind == DKind.Int && y.Kind == DKind.Int)
@@ -435,11 +521,7 @@ internal static class NdSimd
                 };
 
                 var bits = mask.ExtractMostSignificantBits();
-
-                for (var lane = 0; lane < width; lane++)
-                {
-                    result[i + lane] = ((bits >> lane) & 1) != 0;
-                }
+                StoreBools(result.Slice(i, width), bits);
             }
         }
 
@@ -457,6 +539,46 @@ internal static class NdSimd
                 4 => va > vb,
                 _ => va >= vb,
             };
+        }
+    }
+
+    /// <summary>
+    /// Every 4-bit lane mask as four bool bytes, so a compare of four lanes is stored as one
+    /// 32-bit write instead of four branches.
+    /// </summary>
+    private static readonly uint[] LaneBytes = BuildLaneBytes();
+
+    private static uint[] BuildLaneBytes()
+    {
+        var table = new uint[16];
+
+        for (var bits = 0; bits < 16; bits++)
+        {
+            uint word = 0;
+
+            for (var lane = 0; lane < 4; lane++)
+            {
+                if (((bits >> lane) & 1) != 0)
+                {
+                    word |= 1u << (lane * 8);
+                }
+            }
+
+            table[bits] = word;
+        }
+
+        return table;
+    }
+
+    private static void StoreBools(Span<bool> destination, uint bits)
+    {
+        var bytes = MemoryMarshal.AsBytes(destination);
+
+        for (var lane = 0; lane < destination.Length; lane += 4)
+        {
+            System.Runtime.CompilerServices.Unsafe.WriteUnaligned(
+                ref bytes[lane],
+                BitConverter.IsLittleEndian ? LaneBytes[(bits >> lane) & 0xF] : System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(LaneBytes[(bits >> lane) & 0xF]));
         }
     }
 
@@ -488,7 +610,7 @@ internal static class NdSimd
         try
         {
             var input = AsDoubles(x, ref scratch).Span;
-            var d = new double[x.Size];
+            var d = GC.AllocateUninitializedArray<double>(x.Size);
 
             switch (name)
             {

@@ -339,6 +339,41 @@ internal static class Ufuncs
         _ => order >= 0,
     };
 
+    /// <summary>numpy's int64 floor division: rounds toward minus infinity, and 0 for a zero divisor.</summary>
+    internal static long FloorDivide(long a, long b)
+    {
+        unchecked
+        {
+            if (b == 0)
+            {
+                return 0;
+            }
+
+            if (b == -1)
+            {
+                return -a;
+            }
+
+            var quotient = a / b;
+            return (a % b != 0) && ((a < 0) != (b < 0)) ? quotient - 1 : quotient;
+        }
+    }
+
+    /// <summary>numpy's int64 remainder: the sign of the divisor, and 0 for a zero divisor.</summary>
+    internal static long Remainder(long a, long b)
+    {
+        if (b == 0 || b == -1)
+        {
+            return 0;
+        }
+
+        var remainder = a % b;
+        return remainder != 0 && ((remainder < 0) != (b < 0)) ? remainder + b : remainder;
+    }
+
+    /// <summary>numpy's int64 <c>fmod</c>: the sign of the dividend.</summary>
+    internal static long Fmod(long a, long b) => b == 0 || b == -1 ? 0 : a % b;
+
     private static long IntOp(string name, long a, long b)
     {
         unchecked
@@ -348,29 +383,9 @@ internal static class Ufuncs
                 case "add": return a + b;
                 case "subtract": return a - b;
                 case "multiply": return a * b;
-                case "floor_divide":
-                    if (b == 0)
-                    {
-                        return 0;
-                    }
-
-                    if (b == -1)
-                    {
-                        return -a;
-                    }
-
-                    var quotient = a / b;
-                    return (a % b != 0) && ((a < 0) != (b < 0)) ? quotient - 1 : quotient;
-                case "remainder" or "mod":
-                    if (b == 0 || b == -1)
-                    {
-                        return 0;
-                    }
-
-                    var remainder = a % b;
-                    return remainder != 0 && ((remainder < 0) != (b < 0)) ? remainder + b : remainder;
-                case "fmod":
-                    return b == 0 || b == -1 ? 0 : a % b;
+                case "floor_divide": return FloorDivide(a, b);
+                case "remainder" or "mod": return Remainder(a, b);
+                case "fmod": return Fmod(a, b);
                 case "power":
                 {
                     long result = 1;
@@ -402,7 +417,7 @@ internal static class Ufuncs
     }
 
     /// <summary>Python's float floor division and remainder, which numpy shares.</summary>
-    private static (double Floor, double Mod) DivMod(double a, double b)
+    internal static (double Floor, double Mod) DivMod(double a, double b)
     {
         if (b == 0)
         {
@@ -742,7 +757,13 @@ internal static class Ufuncs
         var x = NdConvert.ToArray(whenTrue);
         var y = NdConvert.ToArray(whenFalse);
         var shape = NdArray.BroadcastShapes(c.Shape, x.Shape, y.Shape);
-        NdArray.CheckedSize(shape);
+        var n = NdArray.CheckedSize(shape);
+
+        if (NdSimd.TryWhere(c, x, y, shape, n) is { } selected)
+        {
+            return NdConvert.Wrap(selected);
+        }
+
         var oc = c.BroadcastTo(shape).Offsets();
         var ox = x.BroadcastTo(shape).Offsets();
         var oy = y.BroadcastTo(shape).Offsets();

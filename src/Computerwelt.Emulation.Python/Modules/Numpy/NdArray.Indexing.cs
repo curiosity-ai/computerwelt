@@ -18,6 +18,11 @@ internal sealed partial class NdArray
 
     private PyObject GetItemCore(PyObject index)
     {
+        if (NdSimd.TryMaskGet(this, index) is { } selected)
+        {
+            return selected;
+        }
+
         var plan = Plan(index);
 
         if (plan.View is { } view)
@@ -37,6 +42,11 @@ internal sealed partial class NdArray
 
     private void SetItemCore(PyObject index, PyObject value)
     {
+        if (NdSimd.TryMaskSet(this, index, value))
+        {
+            return;
+        }
+
         var plan = Plan(index);
         var (offsets, shape) = plan.View is { } view ? (view.Offsets(), view.Shape) : (plan.Offsets, plan.Shape);
         Assign(offsets, shape, value);

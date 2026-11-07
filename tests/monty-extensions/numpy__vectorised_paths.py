@@ -112,3 +112,50 @@ assert (p @ q).tolist() == expected
 v = np.array(xs[:70])
 assert close(float(v @ v), math.fsum(x * x for x in xs[:70]), rel=1e-12)
 assert close(float(np.linalg.norm(a)), math.sqrt(math.fsum(x * x for x in xs)), rel=1e-12)
+
+# Masks: selection, assignment through a mask, where and counting.
+w = np.where(a > 0.0, a, -a)
+assert w.tolist() == [x if x > 0.0 else -x for x in xs]
+assert np.where(k % 2 == 0, k, 0).tolist() == [i if i % 2 == 0 else 0 for i in range(N)]
+assert int(np.count_nonzero(mask)) == sum(1 for x in xs if -50.0 < x < 50.0)
+assert int(np.count_nonzero(k)) == N - 1
+assert int(mask.sum()) == int(np.count_nonzero(mask))
+assert k[k % 3 == 0].tolist() == list(range(0, N, 3))
+d = a.copy()
+d[d < 0.0] = 0.0
+assert d.tolist() == [max(x, 0.0) for x in xs]
+e = k.copy()
+e[e > 900] = -1
+assert e.tolist() == [i if i <= 900 else -1 for i in range(N)]
+assert m[m > 0.0].tolist() == [x for x in xs if x > 0.0]
+
+# Floor division and remainder keep Python's sign rules on the typed loops.
+assert (a % 7.0).tolist() == [x % 7.0 for x in xs]
+assert (a // 7.0).tolist() == [x // 7.0 for x in xs]
+assert ((k - 500) % 7).tolist() == [(i - 500) % 7 for i in range(N)]
+assert ((k - 500) // -7).tolist() == [(i - 500) // -7 for i in range(N)]
+assert (k / 4).tolist() == [i / 4 for i in range(N)]
+assert (k * -3).tolist() == [i * -3 for i in range(N)]
+
+# A non-special exponent goes through exp and log: within a few ulps, and pow's own
+# answers at zero, negatives and infinities.
+all_close(b ** 1.5, [y ** 1.5 for y in ys], rel=1e-13)
+edge = np.array([0.0, -2.0, float('inf'), 4.0] * 20) ** 1.5
+assert edge[0] == 0.0 and math.isnan(edge[1]) and edge[2] == float('inf') and edge[3] == 8.0
+
+# A product big enough for the blocked kernel, with edges that are not whole blocks.
+p2 = np.array([[((i * 13 + j * 5) % 9) - 4.0 for j in range(300)] for i in range(37)])
+q2 = np.array([[((i * 3 + j * 11) % 7) - 3.0 for j in range(29)] for i in range(300)])
+pl2, ql2 = p2.tolist(), q2.tolist()
+assert (p2 @ q2).tolist() == [[math.fsum(pl2[i][r] * ql2[r][j] for r in range(300)) for j in range(29)] for i in range(37)]
+ip, iq = p2.astype(np.int64), q2.astype(np.int64)
+assert (ip @ iq).tolist() == [[sum(int(pl2[i][r]) * int(ql2[r][j]) for r in range(300)) for j in range(29)] for i in range(37)]
+col = q2[:, :1].copy()
+assert (p2 @ col).tolist() == [[math.fsum(pl2[i][r] * ql2[r][0] for r in range(300))] for i in range(37)]
+
+# LU-based solves agree with the matrix they came from.
+sq = np.array([[((i * 7 + j * 3) % 10) + (40.0 if i == j else 0.0) for j in range(70)] for i in range(70)])
+inv = np.linalg.inv(sq)
+assert float(np.abs(inv @ sq - np.eye(70)).max()) < 1e-12
+sol = np.linalg.solve(sq, np.arange(70.0))
+assert float(np.abs(sq @ sol - np.arange(70.0)).max()) < 1e-10
