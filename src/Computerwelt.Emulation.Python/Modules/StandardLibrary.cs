@@ -79,6 +79,33 @@ public static class StandardLibrary
         return modules;
     }
 
+    /// <summary>
+    /// Builds a standard module that is only built when a program imports it, or returns
+    /// null for a name that is not one.
+    /// </summary>
+    /// <remarks>
+    /// <c>numpy</c> is several hundred functions and a generator; a run that never imports it
+    /// should not pay for it. Its submodules are attributes of the one package object, so
+    /// <c>import numpy.linalg</c> and <c>np.linalg</c> are the same module within a run.
+    /// </remarks>
+    public static PyObject? CreateOnDemand(VirtualMachine machine, string name)
+    {
+        ArgumentNullException.ThrowIfNull(machine);
+
+        if (name is not ("numpy" or "numpy.linalg" or "numpy.random"))
+        {
+            return null;
+        }
+
+        if (!machine.Modules.TryGetValue("numpy", out var package))
+        {
+            package = Numpy.NumpyModule.Create(machine);
+            machine.Modules["numpy"] = package;
+        }
+
+        return name == "numpy" ? package : package.GetAttribute(name["numpy.".Length..]);
+    }
+
     private static Dictionary<string, PyObject> Core(
         VirtualMachine machine,
         TimeProvider? timeProvider,

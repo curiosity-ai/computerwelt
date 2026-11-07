@@ -448,6 +448,13 @@ public static class BuiltinNamespace
                 ?? throw new PyRaise(PyErrors.TypeError("round() missing required argument 'number' (pos 1)"));
 
             var given = arguments.Length > 1 ? arguments[1] : Keyword(keywords, "ndigits");
+
+            // A host value that rounds itself (an ndarray rounds element-wise).
+            if (number is IPyOperand operand && operand.Convert("round", given is PyNone ? null : given) is { } rounded)
+            {
+                return rounded;
+            }
+
             var requested = given is null or PyNone ? BigInteger.Zero : RequireInt(given, "round");
 
             // A precision wider than any representable number saturates: asking for 10**30
@@ -1074,6 +1081,9 @@ public static class Conversions
             case PyStr text:
                 return ParseInt(text.Value, false, radix, text);
 
+            case IPyOperand operand when given is null && operand.Convert("int", null) is { } converted:
+                return converted;
+
             default:
                 throw new PyRaise(PyErrors.TypeError(
                     $"int() argument must be a string, a bytes-like object or a real number, not '{arguments[0].TypeName}'"));
@@ -1246,6 +1256,10 @@ public static class Conversions
 
                 throw new PyRaise(PyErrors.ValueError($"could not convert string to float: {text.Repr()}"));
             }
+
+            // A host value with conversions of its own (a one-element ndarray).
+            case IPyOperand operand when operand.Convert("float", null) is { } converted:
+                return converted;
 
             default:
                 throw new PyRaise(PyErrors.TypeError(
