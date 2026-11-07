@@ -101,10 +101,10 @@ off, which is the check that the port still stands on upstream's corpus alone.
 
 Where the three newest modules deliberately differ from CPython:
 
-- **No subclassing.** Classes in this interpreter do not inherit — a base in the `class`
-  statement parses and is then never consulted — so `class E(json.JSONEncoder)`,
-  `class D(csv.Dialect)` and `class R(random.Random)` produce classes without the base's
-  members. What replaces each: `cls=`
+- **No subclassing of these C# types.** Python classes inherit now (see "The notebook
+  round"), but `json.JSONEncoder`, `csv.Dialect` and `random.Random` are host types, not
+  Python classes, so `class E(json.JSONEncoder)` is refused as an unacceptable base. What
+  replaces each: `cls=`
   accepts the built-in class or any factory returning an object with `encode` / `decode`;
   a dialect is a name, a built-in class, or any object with the right attributes; `default=`
   covers the encoder case almost every subclass exists for.
@@ -133,11 +133,11 @@ Choose Python for a module that is mostly logic over the object model (`textwrap
 `statistics`, `contextlib`); choose C# for loops a program may run a million times
 (`heapq`, `bisect`) or where the platform has the primitive (`hashlib`).
 
-Two interpreter limits shaped them: exception classes cannot be defined in Python source
-(`class E(ValueError)` does not inherit), so `statistics.StatisticsError` lives in a hidden
-`_hostexc` module; and `del obj.attr`, `str.translate` and `str.format_map` do not exist.
-Not ported for the same reason: `functools.total_ordering` (a dunder added to a class after
-it is created is not dispatched), `cached_property`, `singledispatch`, `statistics.NormalDist`.
+When these were written, exception classes could not be defined in Python source, so
+`statistics.StatisticsError` lives in a hidden `_hostexc` module, and `del obj.attr` did
+not exist. Both work now (see "The notebook round"); the modules were not rewritten to use
+them. `str.translate` and `str.format_map` still do not exist, and `functools.total_ordering`,
+`cached_property`, `singledispatch` and `statistics.NormalDist` are still not ported.
 
 One engine sits behind `fnmatch`, `glob` and `Path.glob`, because CPython's three agree on
 what a pattern means and differ only in what they match it against. `os.walk` is iterative
@@ -172,6 +172,99 @@ Recorded, not fixed, because upstream defines the surface and this port follows 
 |---|---|
 | `open(..., newline='')` | Refused, though nothing here translates line endings and it would describe what already happens. `tests/monty-spec/open__fs.py` pins the refusal; binary mode is the way to ask for exact bytes |
 | `shutil`, `argparse`, `difflib`, `tempfile`, `struct`, … | Not ported. `StandardLibrarySurfaceTests` lists the set in both directions, so adding one is a deliberate edit rather than a silent widening |
+
+## The notebook round  (sessions, the language gaps, the data stack)
+
+The goal was a Python shell inside the product in the style of a notebook: code people
+paste from tutorials has to run, cells have to share state, and results have to come back
+as something a front end can render. Everything below is an extension in the sense of the
+previous section — fixtures in `tests/monty-extensions/`, each of them also checked under
+CPython 3.13 — and none of it contradicts a non-xfail fixture in `tests/monty-spec/`. The
+two upstream fixtures that pin the old refusals (`parse_error__complex.py`,
+`import__star_error.py`) are `xfail=cpython`, which the runner skips.
+
+### Sessions  (`PythonSession`, `Modules/DisplayModule.cs`)
+
+`PythonRunner.StartSession()` (or `PythonOptions.StartSession(fileSystem)` over a shell's
+VFS) keeps one machine and one namespace across cells. Per cell: a fresh instruction budget,
+call depth and output buffer — so history cannot starve a cell and one runaway cell is
+stopped like a script. `CellResult.Outputs` is ordered: stream text, every `display(...)`,
+the trailing expression's value (suppressed by a trailing `;`), then the error. Each is a
+MIME bundle — `text/plain` always, plus whatever `_repr_html_` / `_repr_markdown_` /
+`_repr_svg_` / `_repr_png_` / `_repr_json_` / `_repr_mimebundle_` the value offers.
+`IPython.display` (`display`, `HTML`, `Markdown`, `SVG`, `JSON`, `Latex`, `Image`,
+`clear_output`) exists in sessions only. `_`, `_N` and `Out` hold results. A
+`CancellationToken` stops a cell at the next 1024th instruction as `KeyboardInterrupt`; it
+is a host exception, so no `except` in the cell can swallow it. `sys.exit()` ends the cell,
+not the session. Nothing renders: what a host does with HTML a program produced is the host's
+decision. 16 unit tests (`SessionTests`) and 2 joined (`NotebookTests`).
+
+### The language
+
+| Added | Notes | Fixture |
+|---|---|---|
+| inheritance | C3 MRO, zero-argument `super()` through an implicit `__class__` cell (`OpCode.LoadClassCell`), `__init_subclass__`, `__set_name__`, `__class_getitem__`, `type(name, bases, ns)` | `class__inheritance.py` |
+| exception subclasses | a class deriving from an exception gets a synthetic `PyExceptionType` (`PyClass.ExceptionType`), so `raise`/`except`/tracebacks are unchanged; instances are `PyException`s carrying `UserClass` | `class__inheritance.py` |
+| descriptors | `property` (getter/setter/deleter), `classmethod`, `staticmethod`, user descriptors with `__get__`/`__set__`/`__delete__`; CPython's lookup order (data descriptor, instance, class) | `class__inheritance.py` |
+| attribute hooks | `__getattr__` (only for attribute *access* — the interpreter's own dunder probes bypass it, as CPython's do), `__getattribute__`, `__setattr__`, `__delattr__`, `del obj.attr`, `delattr` | `class__inheritance.py` |
+| built-in bases | `class D(dict)`, `list`, `set`, `str`, `int`, `float`, `tuple`, `bytes`, `frozenset`: the instance carries the built-in value (`PyInstance.BuiltinValue`) and every protocol it does not override falls through to it; `__missing__` on dict subclasses | `class__inheritance.py` |
+| typing classes | `class P(NamedTuple)` with defaults and methods, `TypedDict`, `Generic[T]`/`Protocol` dropped from bases, `TypeVar`/`NewType`/`cast`/`overload` callable | `class__inheritance.py` |
+| `match` | every pattern kind and guards, compiled to bytecode with a failure pop-ladder (five `Match*` opcodes); `match` stays a soft keyword | `match__statement.py` |
+| `complex`, `cmath` | literals, arithmetic, hashing equal to the real part, `complex('1+2j')` | `complex__numbers.py` |
+| `bytearray` | mutation, slices, and every `bytes` method re-wrapped | `bytearray__type.py` |
+| `from m import *` | `__all__`, else public names; module level only | `import__star.py` |
+| introspection | `dir`, `globals`, `locals`, `vars`, `eval`, `exec`, `compile` — same compiler, same machine, same limits; nested `exec` charges the recursion limit | `builtins__introspection.py` |
+| set ordering | `<=`/`<`/`>=`/`>` between sets | `builtins__introspection.py` |
+
+Two conformance bugs fixed: `round(x, n)` rounds the exact binary value half-to-even
+(`round(2.675, 2) == 2.67`), and `dataclasses` was rewritten — every `field()` option,
+`default_factory`, inherited fields, `__post_init__`, `order=`, `frozen=` enforced (with
+CPython's frozen/non-frozen inheritance check), `kw_only`, `__match_args__`, recursive
+`asdict`/`astuple`, `replace` (`round__exact.py`, `dataclass__extended.py`).
+
+`SandboxBoundaryTests` used to pin that `eval`/`exec` do not exist. That test now pins the
+boundary itself: `__import__` stays absent, `exec` reaches only importable modules, and a
+self-executing string ends in `RecursionError`.
+
+Cost, measured with the Release CLI against the previous commit: a loop of 4M `p.x` reads is
+~3% slower (MRO lookup, cached per class and invalidated by a global epoch whenever any class
+namespace changes); start-up is unchanged because every module added in this round is built
+on first import (`StandardLibrary.CreateOnDemand`).
+
+### The standard library
+
+| Added | Where | Fixture |
+|---|---|---|
+| `enum` | C#; class-level behaviour (`Color(1)`, `Color['RED']`, iteration) is a `ClassBehaviour` on `PyClass` — what a metaclass does in CPython | `enum__behaviour.py` |
+| `abc`, `collections.abc` | C#; abstract methods enforced at instantiation; the ABCs answer `isinstance` structurally and may be named as bases | `abc__behaviour.py` |
+| `logging` | Python | `logging_traceback__behaviour.py` |
+| `traceback`, `sys.exc_info`, `sys.exception` | C# | `logging_traceback__behaviour.py` |
+| `decimal`, `fractions`, `struct`, `zlib`, `gzip`, `zipfile`, `zoneinfo`, `secrets`, `types` | C# | one fixture each |
+| `difflib`, `pprint`, `calendar`, `html`, `urllib.parse`, `warnings` | Python | one fixture each |
+| `itertools` (`groupby`, `starmap`, `tee`, `batched`, `combinations_with_replacement`), `collections.ChainMap`, `math.dist` | C# | `itertools_collections_math__extras.py` |
+
+Limits worth knowing: decompression is capped at 64 MiB per member (and an inflate decoder of
+our own, `Inflater.cs`, because `DeflateStream` cannot report truncation or where a stream
+ended), `zipfile` sanitizes member names so extraction stays inside its target, `zoneinfo`
+validates keys before touching the host tz database. Fixed along the way: `yield a, b`
+yielded only `a`, and `str.center` padded on the wrong side.
+
+Not done: `UserDict`/`UserList`/`UserString` (subclass `dict`/`list`/`str` directly instead),
+`decimal`'s `exp`/`ln`/flags, `HtmlDiff`, binary round-tripping through `io.BytesIO`
+(pre-existing), `groupby` collects each group when it hands it out.
+
+### numpy  (`Modules/Numpy/`)
+
+A core of numpy in C#, built on first import. N-dimensional strided arrays with views that
+share memory (slices, `.T`, `reshape`), broadcasting, integer/slice/`...`/`newaxis`/mask/
+fancy indexing and assignment, numpy's own `repr` algorithm, int64 wrap-around, pairwise
+float sums, ufuncs, reductions with `axis`, shape and set functions, `linalg` (`inv`, `det`
+via slogdet, `solve`, `norm`, `eigh`, `cholesky`, `lstsq`), `polyfit`, and `np.random` whose
+legacy seeded stream reproduces numpy's. Operators reach it through `IPyOperand`. One call may
+build at most 2^24 elements and do 2^30 element operations. Absent: numpy scalar types
+(elements are Python numbers), complex dtypes, general `eig`/`svd`/`qr`, `out=`/`where=`,
+structured and datetime dtypes, file I/O. `default_rng` is deterministic but not PCG64.
+Eight `numpy__*.py` fixtures.
 
 ## The browser add-on  (`src/Computerwelt.Playwright/`)
 
@@ -694,7 +787,7 @@ What the measurements still point at:
 | `monty-type-checking` | Wraps [`ty`](https://docs.astral.sh/ty/), an external type checker |
 | `monty-js`, `monty-python`, `monty-wasm-runtime`, `monty-proto` | Binding and transport crates |
 | `monty-typeshed` | Type stubs, only needed by the type checker |
-| CPython compatibility beyond Monty's documented subset | Monty deliberately omits inheritance, metaclasses, `match`, third-party packages and most of the stdlib. `.reference/monty/limitations/` is the contract; the port matches Monty, not CPython |
+| CPython compatibility beyond Monty's documented subset | `.reference/monty/limitations/` is the contract for `tests/monty-spec/`. Where this port goes further — inheritance, `match`, complex, the extra stdlib, numpy/pandas — it is an extension with its own fixtures, and it never contradicts a non-xfail upstream fixture. Still out: user metaclasses, `pip`, C extensions, threads, processes, network |
 
 ---
 
@@ -735,7 +828,7 @@ Upstream: `parse.rs`, `expressions.rs`, `fstring.rs`, `source_map.rs`
 - [x] Source line and column on every node
 - [ ] Remaining parser gaps — 7 fixtures still fail to parse
 - [ ] Parse-error messages matching CPython's, since fixtures compare them
-- [ ] `match` statements — an upstream limitation, tracked but not required
+- [x] `match` statements (PEP 634) — an extension; see "The notebook round"
 
 ## Phase 13 — Compiler  (`src/Computerwelt.Emulation.Python/Compilation/`)
 
@@ -766,8 +859,9 @@ Upstream: `run.rs`, `function.rs`, `heap/`, `heap_data.rs`, `resource_checks.rs`
 - [x] `try`/`except`/`finally` unwinding
 - [x] Iterator protocol and context-manager protocol
 - [x] `print` capture into stdout/stderr buffers rather than a real console
-- [~] Resource limits: instruction count and recursion depth enforced; memory and wall
-      clock are not
+- [~] Resource limits: instruction count and recursion depth enforced; a host
+      `CancellationToken` (`VirtualMachine.Cancellation`) interrupts at the next 1024th
+      instruction, which is how a host imposes wall-clock limits; memory is not capped
 - [~] Generators run on a second, suspendable loop, so a generator holds a live
       enumerator rather than a serializable frame — this is what blocks snapshotting
 - [ ] `yield`'s value being sent back in (`gen.send`)
@@ -782,10 +876,11 @@ Upstream: `types/` (1.1 MB), `builtins/` (188 KB)
 - [x] `int` (arbitrary precision), `float`, `bool`, `NoneType`, `Ellipsis`
 - [x] `str` with 40 methods, plus the `%` and format mini-languages
 - [x] `bytes`, `list`, `tuple`, `dict` (insertion-ordered), `set`, `range`, `slice`
-- [x] User-defined classes — plain classes only; inheritance and metaclasses are
-      upstream limitations, not oversights
+- [x] User-defined classes, with inheritance (C3 MRO), `super()`, descriptors and
+      built-in/exception bases — an extension; user metaclasses remain refused
 - [x] Exception hierarchy with CPython's message wording
-- [ ] `complex`, `bytearray`, `memoryview`, `frozenset` as a distinct type
+- [x] `complex`, `bytearray` — extensions
+- [ ] `memoryview`
 - [x] Dunder dispatch on user classes: `__repr__` `__str__` `__bool__` `__eq__`
       `__hash__` `__lt__` `__len__` `__iter__` `__next__` `__contains__`
       `__getitem__` `__setitem__` `__delitem__`, the arithmetic dunders and their
