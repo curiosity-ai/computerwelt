@@ -10,11 +10,12 @@ namespace Computerwelt.Emulation.Python.Modules;
 /// clock fixes this too, and nothing here asks the operating system directly.
 /// </para>
 /// <para>
-/// <c>sleep</c> does not block. A sandboxed program that could park the host's thread for an
-/// hour would defeat every limit the run has, and nothing it could usefully wait for exists
-/// in here. Instead the sleep is added to a per-run offset that every clock reading
-/// includes, so a program that measures its own sleep sees the time pass — <c>time()</c>
-/// and <c>monotonic()</c> advance by exactly what it asked for.
+/// <c>sleep</c> really waits, as the shell's <c>sleep</c> does — a program polling something
+/// outside the sandbox through a host function needs the time to pass. It is bounded three
+/// ways: a sleep longer than <see cref="ExecutionLimits.MaxSleep"/> raises instead of waiting,
+/// a host that runs Python inside a wider budget shortens it to what is left of that budget
+/// (<see cref="VirtualMachine.SleepBudget"/>), and cancelling the run
+/// (<see cref="VirtualMachine.Cancellation"/>) ends it at once.
 /// </para>
 /// <para>
 /// There is no local time zone in the sandbox: local time is UTC, <c>timezone</c> is 0 and
@@ -23,20 +24,18 @@ namespace Computerwelt.Emulation.Python.Modules;
 /// </remarks>
 public static class TimeModule
 {
-    /// <summary>The longest single sleep that is accepted, in seconds. A day.</summary>
-    private const double MaxSleep = 86400;
-
     /// <summary>Builds the module.</summary>
-    public static PyModuleObject Create(TimeProvider clock)
+    public static PyModuleObject Create(VirtualMachine machine, TimeProvider clock)
     {
+        ArgumentNullException.ThrowIfNull(machine);
+
         var module = new PyModuleObject("time");
-        var slept = TimeSpan.Zero;
         var start = clock.GetTimestamp();
 
-        DateTimeOffset Now() => clock.GetUtcNow() + slept;
+        DateTimeOffset Now() => clock.GetUtcNow();
         double Seconds() => (Now() - DateTimeOffset.UnixEpoch).Ticks / (double)TimeSpan.TicksPerSecond;
         long Nanoseconds() => (Now() - DateTimeOffset.UnixEpoch).Ticks * 100;
-        double Elapsed() => clock.GetElapsedTime(start).TotalSeconds + slept.TotalSeconds;
+        double Elapsed() => clock.GetElapsedTime(start).TotalSeconds;
 
         var structTime = new PyNamedTupleType(
             "time.struct_time",
@@ -129,12 +128,32 @@ public static class TimeModule
                 throw new PyRaise(PyErrors.ValueError("sleep length must be non-negative"));
             }
 
-            if (seconds > MaxSleep)
+            var maximum = machine.Limits.MaxSleep;
+
+            if (seconds > maximum.TotalSeconds)
             {
-                throw new PyRaise(PyErrors.OverflowErrorFor($"sleep length is limited to {MaxSleep:0} seconds in this sandbox"));
+                throw new PyRaise(PyErrors.ValueError(
+                    $"sleep length {seconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds exceeds the maximum of "
+                    + $"{maximum.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds this sandbox allows"));
             }
 
-            slept += TimeSpan.FromSeconds(seconds);
+            var duration = TimeSpan.FromSeconds(seconds);
+
+            // Shortened to what is left of a host's wider budget, as the shell's sleep is to its
+            // timeout: the program still sees time pass, and the run around it still ends.
+            if (machine.SleepBudget?.Invoke() is { } remaining && duration > remaining)
+            {
+                duration = remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+            }
+
+            if (duration > TimeSpan.Zero)
+            {
+                // The machine runs synchronously, so the wait blocks its thread. A cancelled run
+                // ends the wait with OperationCanceledException, which no `except` can catch -
+                // the same way an interrupt ends the machine between instructions.
+                Task.Delay(duration, machine.Cancellation).GetAwaiter().GetResult();
+            }
+
             return PyNone.Instance;
         });
 

@@ -34,6 +34,16 @@ public sealed record ExecutionLimits
     /// <summary>Wall-clock budget for the whole execution. Default 30s.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The longest a single <c>sleep</c> may wait. Default one hour.
+    /// </summary>
+    /// <remarks>
+    /// A longer sleep fails with a message naming the limit instead of waiting; one within it
+    /// that would outlast <see cref="Timeout"/> is shortened to what is left of the run, as
+    /// before. The <c>python</c> command applies the same limit to <c>time.sleep</c>.
+    /// </remarks>
+    public TimeSpan MaxSleep { get; init; } = TimeSpan.FromHours(1);
+
     /// <summary>Wall-clock budget for parsing alone. Default 5s.</summary>
     public TimeSpan ParserTimeout { get; init; } = TimeSpan.FromSeconds(5);
 

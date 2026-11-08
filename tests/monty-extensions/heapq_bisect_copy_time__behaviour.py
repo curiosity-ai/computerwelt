@@ -1,5 +1,5 @@
 # Extension: `heapq`, `bisect`, `copy` and `time`. Upstream Monty has none of them.
-# `time.sleep` does not block: it advances the clock the program reads. Expected output is
+# `time.sleep` really waits, as it does in CPython. Expected output is
 # CPython 3.13's (the time lines print only comparisons, so they hold on any clock).
 _lines = []
 

@@ -94,7 +94,7 @@ public sealed class IdentityBuiltin : IBuiltin
     }
 }
 
-/// <summary><c>sleep</c> — pauses, bounded by the execution timeout.</summary>
+/// <summary><c>sleep</c> — pauses, bounded by <see cref="ExecutionLimits.MaxSleep"/> and the execution timeout.</summary>
 public sealed class SleepBuiltin : IBuiltin
 {
     /// <inheritdoc />
@@ -122,12 +122,23 @@ public sealed class SleepBuiltin : IBuiltin
                 return ExecResult.Error($"sleep: invalid time interval '{argument}'\n", ExitCodes.Failure);
             }
 
-            total += duration;
+            total = duration > TimeSpan.MaxValue - total ? TimeSpan.MaxValue : total + duration;
         }
 
         if (operands == 0)
         {
             return ExecResult.Error("sleep: missing operand\n", ExitCodes.Failure);
+        }
+
+        // Refused rather than shortened: a script that asked for longer than a sleep may last
+        // is told so, instead of carrying on as though it had slept that long.
+        var maximum = context.Budget.Limits.MaxSleep;
+
+        if (total > maximum)
+        {
+            return ExecResult.Error(
+                $"sleep: {Seconds(total)} seconds exceeds the maximum sleep of {Seconds(maximum)} seconds this sandbox allows\n",
+                ExitCodes.Failure);
         }
 
         // A sleep longer than the remaining budget would only end in a timeout, so it is
@@ -145,6 +156,9 @@ public sealed class SleepBuiltin : IBuiltin
 
         return ExecResult.Success;
     }
+
+    private static string Seconds(TimeSpan duration) =>
+        duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
 
     /// <summary>Parses a duration with an optional s/m/h/d suffix.</summary>
     internal static bool TryParseDuration(string text, out TimeSpan duration)
@@ -167,12 +181,16 @@ public sealed class SleepBuiltin : IBuiltin
             case 'd': multiplier = 86400; numberPart = text[..^1]; break;
         }
 
-        if (!double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || value < 0)
+        if (!double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || value < 0 || double.IsNaN(value))
         {
             return false;
         }
 
-        duration = TimeSpan.FromSeconds(value * multiplier);
+        // Saturates rather than throwing: a duration too long to represent is still a duration,
+        // and the caller's own limit is what refuses it.
+        var seconds = value * multiplier;
+
+        duration = seconds >= TimeSpan.MaxValue.TotalSeconds ? TimeSpan.MaxValue : TimeSpan.FromSeconds(seconds);
         return true;
     }
 }
