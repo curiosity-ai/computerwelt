@@ -87,10 +87,11 @@ public sealed record PlaywrightOptions
     /// stumbling into.
     /// </para>
     /// <para>
-    /// The check runs twice, and deliberately: once on the navigation a script asked for, so
-    /// the error names the URL it typed, and once on every request the page makes, so a
-    /// redirect, an image, an iframe or a <c>fetch</c> the page performs cannot reach
-    /// somewhere the script could not have navigated to itself.
+    /// The check runs on the navigation a script asked for, so the error names the URL it typed;
+    /// on every request a page makes, so a redirect, an image, an iframe or a <c>fetch</c> cannot
+    /// reach somewhere the script could not have navigated to itself; and in the session's proxy,
+    /// which every context's traffic goes through, so a WebSocket or a worker's request - which no
+    /// request route sees - is held to the same list.
     /// </para>
     /// </remarks>
     public IReadOnlyList<string> AllowedHosts { get; init; } = [];

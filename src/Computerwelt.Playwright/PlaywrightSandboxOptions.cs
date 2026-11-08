@@ -73,8 +73,12 @@ public sealed record PlaywrightSandboxOptions
     /// <para>
     /// The driver talks to the host and to the browser over pipes, so neither needs a port of
     /// its own. Name every port a page should reach — usually <c>80</c> and <c>443</c>, plus
-    /// whatever local service the browser is meant to see — and <c>53</c> if name resolution
-    /// may fall back to TCP.
+    /// whatever local service the browser is meant to see.
+    /// </para>
+    /// <para>
+    /// A page reaches the network through the session's proxy, so the kernel confines the browser
+    /// to the proxy's port and the proxy enforces this list on the connections it opens for it —
+    /// on every kernel, whether or not Landlock can confine TCP itself.
     /// </para>
     /// </remarks>
     public IReadOnlyList<int>? AllowedTcpPorts { get; init; }
