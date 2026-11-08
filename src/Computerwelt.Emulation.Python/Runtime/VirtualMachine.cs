@@ -149,6 +149,16 @@ public sealed class VirtualMachine
     /// </summary>
     public CancellationToken Cancellation { get; set; }
 
+    /// <summary>
+    /// How long a sleep may still wait, or <see langword="null"/> for as long as it asked.
+    /// </summary>
+    /// <remarks>
+    /// Set by a host that runs Python inside a wider time budget - the shell's <c>python</c>
+    /// command hands it what is left of the shell's timeout - so a sleep is shortened to it,
+    /// the way the shell's own <c>sleep</c> is, rather than outliving the run around it.
+    /// </remarks>
+    public Func<TimeSpan>? SleepBudget { get; set; }
+
     private void CheckCancellation()
     {
         if ((_instructionCount & 0x3FF) == 0 && Cancellation.IsCancellationRequested)
@@ -2983,4 +2993,14 @@ public sealed record ExecutionLimits
     /// </para>
     /// </remarks>
     public int MaxDirectoryDepth { get; init; } = 64;
+
+    /// <summary>
+    /// The longest a single <c>time.sleep</c> may wait. Default one hour.
+    /// </summary>
+    /// <remarks>
+    /// A sleep really waits, so this bounds how long one call can hold the run. A longer one
+    /// raises <c>ValueError</c> naming the limit rather than being shortened, so a program
+    /// that asked for a day finds out it will not get one.
+    /// </remarks>
+    public TimeSpan MaxSleep { get; init; } = TimeSpan.FromHours(1);
 }

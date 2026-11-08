@@ -124,8 +124,9 @@ public static class StandardLibrary
             case "gzip": return GzipModule.Create(storage, machine, clock);
             case "zipfile": return ZipfileModule.Create(storage, machine, clock);
 
-            // Time comes from the run's clock, so the module is built over it.
-            case "time": return TimeModule.Create(clock);
+            // Time comes from the run's clock, and a sleep waits under the machine's limits and
+            // cancellation, so the module is built over both.
+            case "time": return TimeModule.Create(machine, clock);
 
             case "pathlib": return PathlibModule.Create(storage, maxDepth);
             case "io": return IoModule.Create(storage);

@@ -104,10 +104,29 @@ public sealed class PythonRunner
     /// </remarks>
     public string? StandardInput { get; set; }
 
+    /// <summary>
+    /// How long a <c>time.sleep</c> may still wait, asked at each sleep, or
+    /// <see langword="null"/> for as long as it asked (up to <see cref="ExecutionLimits.MaxSleep"/>).
+    /// </summary>
+    /// <remarks>
+    /// For a host running Python inside a wider time budget: the shell's <c>python</c> command
+    /// hands it what is left of the shell's timeout, so a sleep is shortened to it exactly as the
+    /// shell's own <c>sleep</c> is.
+    /// </remarks>
+    public Func<TimeSpan>? SleepBudget { get; set; }
+
     /// <summary>Runs <paramref name="source"/> and reports what happened.</summary>
-    public RunResult Run(string source, string fileName = "<stdin>")
+    /// <param name="source">The program.</param>
+    /// <param name="fileName">What a traceback calls it.</param>
+    /// <param name="cancellationToken">
+    /// Stops the run from outside: between instructions, and in the middle of a <c>time.sleep</c>.
+    /// A cancelled run ends with <see cref="OperationCanceledException"/> rather than a result.
+    /// </param>
+    public RunResult Run(string source, string fileName = "<stdin>", CancellationToken cancellationToken = default)
     {
         var machine = CreateMachine(fileName);
+
+        machine.Cancellation = cancellationToken;
 
         try
         {
@@ -139,7 +158,7 @@ public sealed class PythonRunner
         // The builtins close over the machine — `print` writes to its buffers, `sorted`
         // calls back into it — so the namespace is filled after the machine exists rather
         // than passed to its constructor.
-        var machine = new VirtualMachine(globals, builtins, Limits);
+        var machine = new VirtualMachine(globals, builtins, Limits) { SleepBudget = SleepBudget };
 
         BuiltinNamespace.Populate(machine, builtins);
 

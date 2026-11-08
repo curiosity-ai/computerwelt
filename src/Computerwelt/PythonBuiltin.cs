@@ -59,10 +59,16 @@ public sealed class PythonBuiltin : IBuiltin
         // The filesystem modules close over the shell's state, so `os.getcwd()` follows a
         // `cd` that happened earlier in the same script, and `open` reads the same files
         // the surrounding shell commands wrote.
-        var runner = _options.CreateRunner(new ShellFileSystem(
+        var options = _options.MaxSleep is null ? _options with { MaxSleep = context.Budget.Limits.MaxSleep } : _options;
+
+        var runner = options.CreateRunner(new ShellFileSystem(
             context.FileSystem,
             () => context.State.WorkingDirectory,
             () => context.State.ExportedEnvironment()));
+
+        // A sleep is shortened to what is left of the shell's timeout, exactly as the shell's own
+        // `sleep` is, so a program cannot hold the run past it.
+        runner.SleepBudget = () => context.Budget.Limits.Timeout - context.Budget.Elapsed;
 
         // `sys.argv` is the invocation as written, so `python script.py --flag value` reads
         // its own options the way a script assumes it can.
@@ -76,7 +82,11 @@ public sealed class PythonBuiltin : IBuiltin
             runner.StandardInput = context.StdinText;
         }
 
-        var result = runner.Run(source!, scriptName);
+        // The machine runs synchronously, so it gets a thread of its own: run inline, it would
+        // hold this call until the program ended, and `timeout` - which starts its clock only
+        // once the command hands back a task - could never interrupt it. The shell's
+        // cancellation stops the program between instructions and in the middle of a sleep.
+        var result = await Task.Run(() => runner.Run(source!, scriptName, cancellationToken), cancellationToken);
 
         if (result.Succeeded)
         {
@@ -208,6 +218,16 @@ public sealed record PythonOptions
     public int MaxDirectoryDepth { get; init; } = 64;
 
     /// <summary>
+    /// The longest a single <c>time.sleep</c> may wait, or <see langword="null"/> for the shell's.
+    /// </summary>
+    /// <remarks>
+    /// Left null, the <c>python</c> command uses the shell's <c>ExecutionLimits.MaxSleep</c>, so
+    /// one setting bounds <c>sleep</c> and <c>time.sleep</c> alike; a session opened with
+    /// <see cref="StartSession"/>, which has no shell, gets the Python default of one hour.
+    /// </remarks>
+    public TimeSpan? MaxSleep { get; init; }
+
+    /// <summary>
     /// Extra libraries the host makes importable from Python.
     /// </summary>
     /// <remarks>
@@ -252,6 +272,7 @@ public sealed record PythonOptions
             MaxInstructions = MaxInstructions,
             MaxRecursionDepth = MaxRecursionDepth,
             MaxDirectoryDepth = MaxDirectoryDepth,
+            MaxSleep = MaxSleep ?? PythonLimits.Default.MaxSleep,
         })
         {
             FileSystem = fileSystem,
