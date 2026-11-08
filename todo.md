@@ -321,7 +321,15 @@ something. A browser type the host did not list is not launchable at all.
 `page.goto` only would be theatre: a page redirects, loads images, embeds iframes and calls
 `fetch` on its own behalf, and none of that goes through `goto`. So every context the
 sandbox opens carries a `RouteAsync("**/*")` filter that aborts anything
-`PlaywrightOptions.AllowedHosts` does not allow. `goto` is *also* checked, purely so the
+`PlaywrightOptions.AllowedHosts` does not allow. A route never sees a WebSocket handshake or a
+request a worker makes, though, so the route is not the boundary either: every context is
+opened through the session's own loopback proxy (`Interop/BrowserProxy`), signed in with
+credentials of its own that map to its policy, with loopback included (`<-loopback>`), and the
+proxy decides each `CONNECT` tunnel and plain HTTP request before anything leaves the machine.
+The browser itself is launched through the proxy with no credentials, so a context opened
+without them reaches nothing; a caller-supplied `Proxy` is refused. Under a TCP-confining
+sandbox the kernel holds the browser to the proxy's port and the proxy enforces
+`AllowedTcpPorts` on what it connects to. `goto` is *also* checked, purely so the
 error names the URL the script typed. The default is empty — nothing reachable — and `file:`
 is not an allowed scheme with or without a wildcard, because it would hand the browser the
 host's disk.

@@ -26,18 +26,21 @@ public sealed class PlaywrightSession : IAsyncDisposable
     private readonly Dictionary<string, IBrowser> _browsers = new(StringComparer.Ordinal);
     private readonly List<IBrowserContext> _contexts = [];
     private readonly List<PlaywrightScope> _scopes = [];
+    private readonly BrowserProxy _proxy;
     private IPlaywright? _playwright;
     private PlaywrightScope? _defaultScope;
     private bool _disposed;
 
     private PlaywrightSession(
         IPlaywright playwright,
+        BrowserProxy proxy,
         PlaywrightOptions options,
         PlaywrightSandboxStatus sandboxStatus,
         string? temporaryDirectory,
         IReadOnlyList<string> writablePaths)
     {
         _playwright = playwright;
+        _proxy = proxy;
         Options = options;
         Policy = new NavigationPolicy(options);
         SandboxStatus = sandboxStatus;
@@ -155,48 +158,72 @@ public sealed class PlaywrightSession : IAsyncDisposable
             return starting;
         }
 
-        if (options.Sandbox is not { } sandbox)
-        {
-            var playwright = await Start().ConfigureAwait(false);
-
-            return new PlaywrightSession(playwright, options, PlaywrightSandboxStatus.NotRequested, temporary, []);
-        }
-
-        string? note = null;
-
-        if (temporary is not null && !DriverEnvironment.IsSupported)
-        {
-            // The driver will write to the host's temporary directory whatever was asked, so a
-            // ruleset granting only the one asked for would leave the browser unable to start.
-            note = "PlaywrightOptions.TemporaryDirectory could not be handed to this version of the Playwright "
-                + "driver, so the host's temporary directory is writable too";
-            sandbox = sandbox with { ReadWritePaths = [.. sandbox.ReadWritePaths, Path.GetTempPath()] };
-        }
-
-        // The driver is forked inside CreateAsync's synchronous part, so it is that part that has
-        // to run on the confined thread; the rest of the start-up awaits on the thread pool.
-        var (starting, status) = await LandlockConfinement.RunAsync(sandbox, temporary, Start).ConfigureAwait(false);
-
-        if (note is not null && status.FileSystemConfined)
-        {
-            status = status with { Reason = status.Reason is null ? note : $"{status.Reason}; {note}" };
-        }
-
-        IReadOnlyList<string> writable = status.FileSystemConfined
-            ? LandlockConfinement.Grants(sandbox, temporary).ReadWrite
-            : [];
+        // Started before the driver, because a ruleset confining TCP has to name its port.
+        var proxy = BrowserProxy.Start(options.Sandbox?.AllowedTcpPorts);
 
         try
         {
-            return new PlaywrightSession(await starting.ConfigureAwait(false), options, status, temporary, writable);
+            return await StartAsync().ConfigureAwait(false);
         }
-        catch (PlaywrightException exception) when (status.FileSystemConfined)
+        catch
         {
-            throw new PlaywrightSandboxException(
-                "the Playwright driver did not start inside the Landlock sandbox. If it starts without "
-                + "PlaywrightOptions.Sandbox, the ruleset is denying a path it needs - add it to "
-                + $"PlaywrightSandboxOptions.ReadOnlyPaths or ReadWritePaths. {exception.Message}",
-                exception);
+            await proxy.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        // A local function, so `temporary` stays the one Start() clears when the driver could not take it.
+        async Task<PlaywrightSession> StartAsync()
+        {
+            if (options.Sandbox is not { } sandbox)
+            {
+                var playwright = await Start().ConfigureAwait(false);
+
+                return new PlaywrightSession(playwright, proxy, options, PlaywrightSandboxStatus.NotRequested, temporary, []);
+            }
+
+            // Every page reaches the network through the proxy, so a browser confined to a list of
+            // ports needs the proxy's - and, behind it, needs nothing else.
+            if (sandbox.AllowedTcpPorts is { } ports)
+            {
+                sandbox = sandbox with { AllowedTcpPorts = [.. ports, proxy.Port] };
+            }
+
+            string? note = null;
+
+            if (temporary is not null && !DriverEnvironment.IsSupported)
+            {
+                // The driver will write to the host's temporary directory whatever was asked, so a
+                // ruleset granting only the one asked for would leave the browser unable to start.
+                note = "PlaywrightOptions.TemporaryDirectory could not be handed to this version of the Playwright "
+                    + "driver, so the host's temporary directory is writable too";
+                sandbox = sandbox with { ReadWritePaths = [.. sandbox.ReadWritePaths, Path.GetTempPath()] };
+            }
+
+            // The driver is forked inside CreateAsync's synchronous part, so it is that part that has
+            // to run on the confined thread; the rest of the start-up awaits on the thread pool.
+            var (starting, status) = await LandlockConfinement.RunAsync(sandbox, temporary, Start).ConfigureAwait(false);
+
+            if (note is not null && status.FileSystemConfined)
+            {
+                status = status with { Reason = status.Reason is null ? note : $"{status.Reason}; {note}" };
+            }
+
+            IReadOnlyList<string> writable = status.FileSystemConfined
+                ? LandlockConfinement.Grants(sandbox, temporary).ReadWrite
+                : [];
+
+            try
+            {
+                return new PlaywrightSession(await starting.ConfigureAwait(false), proxy, options, status, temporary, writable);
+            }
+            catch (PlaywrightException exception) when (status.FileSystemConfined)
+            {
+                throw new PlaywrightSandboxException(
+                    "the Playwright driver did not start inside the Landlock sandbox. If it starts without "
+                    + "PlaywrightOptions.Sandbox, the ruleset is denying a path it needs - add it to "
+                    + $"PlaywrightSandboxOptions.ReadOnlyPaths or ReadWritePaths. {exception.Message}",
+                    exception);
+            }
         }
     }
 
@@ -288,6 +315,10 @@ public sealed class PlaywrightSession : IAsyncDisposable
                 Channel = Options.Channel,
                 ExecutablePath = Options.ExecutablePath,
                 Timeout = Options.LaunchTimeout,
+
+                // With no credentials: a context opened without its own sign-in to the proxy
+                // (AdoptAsync's NewContextAsync paths give every one of ours one) reaches nothing.
+                Proxy = new Proxy { Server = _proxy.Server, Bypass = "<-loopback>" },
             }).ConfigureAwait(false);
 
             _browsers[name] = browser;
@@ -329,10 +360,16 @@ public sealed class PlaywrightSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(policy);
 
         CheckCanOpen(cancellationToken);
+        RefuseOwnProxy(options.Proxy);
+
+        var registration = _proxy.Register(policy);
 
         options.ViewportSize = Options.ViewportFor(options.ViewportSize);
 
-        return await AdoptAsync(await browser.NewContextAsync(options).ConfigureAwait(false), policy).ConfigureAwait(false);
+        // A copy, so the caller's options do not come back carrying this context's credentials.
+        var opening = new BrowserNewContextOptions(options) { Proxy = registration.ToProxy() };
+
+        return await AdoptAsync(() => browser.NewContextAsync(opening), policy, registration).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -362,6 +399,7 @@ public sealed class PlaywrightSession : IAsyncDisposable
         }
 
         CheckCanOpen(cancellationToken);
+        RefuseOwnProxy(options.Proxy);
 
         BrowserTypeLaunchPersistentContextOptions launch;
 
@@ -388,16 +426,23 @@ public sealed class PlaywrightSession : IAsyncDisposable
         Directory.CreateDirectory(profileDirectory);
 
         var playwright = _playwright ?? throw new ObjectDisposedException(nameof(PlaywrightSession));
-        var context = await TypeOf(playwright, browserName).LaunchPersistentContextAsync(profileDirectory, launch).ConfigureAwait(false);
+        var registration = _proxy.Register(policy);
 
-        // A persistent context opens with a blank page of its own. A script expects a new context
-        // to have none, and a host showing the scope's pages would show an empty one.
-        foreach (var page in context.Pages.ToArray())
+        launch.Proxy = registration.ToProxy();
+
+        return await AdoptAsync(async () =>
         {
-            await page.CloseAsync().ConfigureAwait(false);
-        }
+            var context = await TypeOf(playwright, browserName).LaunchPersistentContextAsync(profileDirectory, launch).ConfigureAwait(false);
 
-        return await AdoptAsync(context, policy).ConfigureAwait(false);
+            // A persistent context opens with a blank page of its own. A script expects a new context
+            // to have none, and a host showing the scope's pages would show an empty one.
+            foreach (var page in context.Pages.ToArray())
+            {
+                await page.CloseAsync().ConfigureAwait(false);
+            }
+
+            return context;
+        }, policy, registration).ConfigureAwait(false);
     }
 
     private void CheckCanOpen(CancellationToken cancellationToken)
@@ -427,8 +472,26 @@ public sealed class PlaywrightSession : IAsyncDisposable
     /// Every context the sandbox uses comes through here, whichever way it was opened, which is
     /// what makes the request filter hold for all of them.
     /// </remarks>
-    private async Task<IBrowserContext> AdoptAsync(IBrowserContext context, NavigationPolicy policy)
+    private async Task<IBrowserContext> AdoptAsync(
+        Func<Task<IBrowserContext>> open,
+        NavigationPolicy            policy,
+        BrowserProxy.Registration   registration)
     {
+        IBrowserContext context;
+
+        try
+        {
+            context = await open().ConfigureAwait(false);
+        }
+        catch
+        {
+            registration.Dispose();
+            throw;
+        }
+
+        // The credentials live exactly as long as the context: a closed context's are withdrawn.
+        context.Close += (_, _) => registration.Dispose();
+
         context.SetDefaultTimeout(Options.DefaultTimeout);
         context.SetDefaultNavigationTimeout(Options.DefaultTimeout);
 
@@ -464,6 +527,17 @@ public sealed class PlaywrightSession : IAsyncDisposable
         }
 
         return context;
+    }
+
+    // The proxy a context is opened with is what enforces its host list, so nobody else picks it.
+    private static void RefuseOwnProxy(Proxy? proxy)
+    {
+        if (proxy is not null)
+        {
+            throw new ArgumentException(
+                "BrowserNewContextOptions.Proxy cannot be set: every context goes through the session's own proxy, "
+                + "which is what enforces PlaywrightOptions.AllowedHosts.");
+        }
     }
 
     private static IBrowserType TypeOf(IPlaywright playwright, string name) => name switch
@@ -540,6 +614,8 @@ public sealed class PlaywrightSession : IAsyncDisposable
         _browsers.Clear();
         _playwright?.Dispose();
         _playwright = null;
+
+        await _proxy.DisposeAsync().ConfigureAwait(false);
         _gate.Dispose();
     }
 }
