@@ -160,6 +160,26 @@ public sealed partial class PythonSession : IDisposable
         };
     }
 
+    /// <summary>
+    /// Runs setup source in the session's namespace without counting as a cell: no execution number, no output.
+    /// The way a host puts a library's names (<c>from curiosity import *</c>) in scope before the first cell.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The source failed; the message is the error.</exception>
+    public void Initialize(string source)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var result = Run(source);
+
+        ExecutionCount--;
+        _outputs.Clear();
+
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException(result.Traceback ?? "The session's setup source failed.");
+        }
+    }
+
     /// <summary>Clears the namespace, keeping the session's machine and its imported modules' code.</summary>
     public void Reset()
     {

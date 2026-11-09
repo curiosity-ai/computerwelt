@@ -206,6 +206,23 @@ attributes of a *dotted name* (`math.sq`, `value.up`) by attribute lookup only, 
 calls a function the person wrote: `f().up` completes nothing, and a test pins that `f`
 did not run.
 
+### Host objects  (`HostObjects/`)
+
+`PyHostObject.Wrap(value, policy)` hands a program a C# object it reaches by attribute: properties read, methods
+called (by `Name` or `snake_case`, positional or keyword, overloads tried in order), results converted. What is
+reachable is a `HostObjectPolicy`: only members *declared by* an exposed type (so `GetType()` and the framework's
+members are not there), named members hidden (`Internals`), and a value of a type the policy does not expose arrives as
+its text, never as an object. Text types (an id) cross as strings and are read back through `Parse`.
+A `Task` result is awaited by blocking the calling thread — the one blocking wait in the bridge, sound because a
+cell runs on a thread of its own; a host must not drive a session from a thread with a synchronisation context.
+A cancellation stays an `OperationCanceledException`, so no `except` in the program swallows an interrupt.
+
+Completion reads *declared types*, not values: `HostShape` follows `Q().StartAt('x').` by each method's return type
+(a task's result type looked through) under the same policy, calling nothing; a Python call is still not followed.
+`PythonLibrary.FromSource(name, source, hostNames)` gives a library source host-built names (the object it builds its
+members from); `PythonSession.Initialize(source)` runs setup (`from lib import *`) without counting as a cell.
+10 tests in `HostObjectTests`. Not covered: generic methods, delegates (not callable from Python), indexers.
+
 ### The language
 
 | Added | Notes | Fixture |

@@ -138,7 +138,7 @@ public sealed class PyFunction : PyCallable
 }
 
 /// <summary>A function implemented in C#.</summary>
-public sealed class PyBuiltinFunction : PyCallable
+public class PyBuiltinFunction : PyCallable
 {
     private readonly Func<PyObject[], PyDict?, PyObject> _implementation;
 

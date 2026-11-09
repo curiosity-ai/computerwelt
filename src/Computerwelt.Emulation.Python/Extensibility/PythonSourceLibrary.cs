@@ -23,17 +23,23 @@ namespace Computerwelt.Emulation.Python;
 public sealed class PythonSourceLibrary : PythonLibrary
 {
     private readonly string _source;
+    private readonly Func<PythonHostContext, IReadOnlyDictionary<string, PyObject>>? _hostNames;
 
     /// <summary>Creates a library from Python source.</summary>
     /// <param name="name">The name a program imports.</param>
     /// <param name="source">The module's source.</param>
-    public PythonSourceLibrary(string name, string source)
+    /// <param name="hostNames">
+    /// Names the host puts in the module's namespace before the source runs — a host object the source builds
+    /// its members from. Called once per run that imports the library, so each run gets its own.
+    /// </param>
+    public PythonSourceLibrary(string name, string source, Func<PythonHostContext, IReadOnlyDictionary<string, PyObject>>? hostNames = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(source);
 
         Name = name;
         _source = source;
+        _hostNames = hostNames;
     }
 
     /// <inheritdoc />
@@ -50,6 +56,14 @@ public sealed class PythonSourceLibrary : PythonLibrary
         // usual `if __name__ == "__main__":` guard behaves as a library when imported.
         globals.Set(new PyStr("__name__"), new PyStr(Name));
         globals.Set(new PyStr("__file__"), new PyStr($"<{Name}>"));
+
+        if (_hostNames is not null)
+        {
+            foreach (var (hostName, value) in _hostNames(context))
+            {
+                globals.Set(new PyStr(hostName), value);
+            }
+        }
 
         CodeObject code;
 

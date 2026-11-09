@@ -41,6 +41,13 @@ public abstract class PythonLibrary
     /// <param name="source">The module's source, run in a namespace of its own on first import.</param>
     public static PythonLibrary FromSource(string name, string source) => new PythonSourceLibrary(name, source);
 
+    /// <summary>Creates a library from Python source that is also handed host-supplied names.</summary>
+    /// <param name="name">The name a program imports.</param>
+    /// <param name="source">The module's source, run in a namespace of its own on first import.</param>
+    /// <param name="hostNames">Names placed in that namespace first, built per run — see <see cref="HostObjects.PyHostObject"/>.</param>
+    public static PythonLibrary FromSource(string name, string source, Func<PythonHostContext, IReadOnlyDictionary<string, PyObject>> hostNames) =>
+        new PythonSourceLibrary(name, source, hostNames);
+
     /// <summary>Creates a library whose module the host builds in C#.</summary>
     /// <param name="name">The name a program imports.</param>
     /// <param name="factory">Builds the module. Called once per run that imports the name.</param>
