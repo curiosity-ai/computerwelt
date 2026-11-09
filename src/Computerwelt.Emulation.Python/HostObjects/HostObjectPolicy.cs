@@ -48,6 +48,9 @@ public sealed class HostObjectPolicy
         return new HostObjectPolicy(type => set.Contains(type.Assembly), hiddenMembers, textTypes);
     }
 
+    /// <summary>How members are named to a program. Pythonic by default; either spelling is accepted on lookup.</summary>
+    public HostNameStyle NameStyle { get; init; } = HostNameStyle.Pythonic;
+
     /// <summary>The most items an enumerable result may hold when it is turned into a list.</summary>
     public int MaxItems { get; init; } = 1_000_000;
 

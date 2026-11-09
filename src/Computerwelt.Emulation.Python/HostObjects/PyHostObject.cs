@@ -113,7 +113,7 @@ public sealed class PyHostObject : PyObject, IPyAttributeNames, IPyHasShape
             return Guard(() => ToPython(field.GetValue(Target), _policy));
         }
 
-        return new PyHostMethod(entry.Name, entry, HostShape.OfMethods(entry.Methods, _policy), (arguments, keywords) => Invoke(entry, arguments, keywords));
+        return new PyHostMethod(entry.Shown, entry, HostShape.OfMethods(entry.Methods, _policy), (arguments, keywords) => Invoke(entry, arguments, keywords));
     }
 
     /// <inheritdoc />
@@ -172,7 +172,7 @@ public sealed class PyHostObject : PyObject, IPyAttributeNames, IPyHasShape
         }
 
         throw new PyRaise(PyErrors.TypeError(
-            $"{Target.GetType().Name}.{entry.Name}() has no overload for these arguments:\n  " + string.Join("\n  ", failures)));
+            $"{Target.GetType().Name}.{entry.Shown}() has no overload for these arguments:\n  " + string.Join("\n  ", failures)));
     }
 
     private bool TryBind(MethodInfo method, PyObject[] positional, PyDict? keywords, out object?[] bound, out string why)
@@ -230,7 +230,8 @@ public sealed class PyHostObject : PyObject, IPyAttributeNames, IPyHasShape
             foreach (var (key, value) in keywords.Entries)
             {
                 var name = key.Display();
-                var index = Array.FindIndex(parameters, p => string.Equals(p.Name, name, StringComparison.Ordinal));
+                var wanted = HostNames.Key(name);
+                var index = Array.FindIndex(parameters, p => p.Name is not null && HostNames.Key(p.Name) == wanted);
 
                 if (index < 0 || supplied[index])
                 {

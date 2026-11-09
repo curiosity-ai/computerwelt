@@ -25,6 +25,29 @@ public sealed class HostObjectTests
         return session;
     }
 
+    [Theory]
+    [InlineData("Q", "q")]
+    [InlineData("StartAt", "start_at")]
+    [InlineData("CurrentUser", "current_user")]
+    [InlineData("userUID", "user_uid")]
+    [InlineData("AsUIDEnumerable", "as_uid_enumerable")]
+    [InlineData("RunEndpointAsync", "run_endpoint_async")]
+    [InlineData("IsCancellationRequested", "is_cancellation_requested")]
+    [InlineData("Base64Encode", "base64_encode")]
+    [InlineData("already_snake", "already_snake")]
+    public void C_sharp_names_become_snake_case(string declared, string expected) => Assert.Equal(expected, HostNames.ToPython(declared));
+
+    [Fact]
+    public void Members_are_listed_in_python_style_and_found_by_either_spelling_and_keywords_follow()
+    {
+        using var session = Open(new Scope());
+
+        Assert.Equal("5", session.Run("Q().count(start=2, stop=7)").Outputs[0].Text);
+        Assert.Equal("5", session.Run("Q().Count(Start=2, STOP=7)").Outputs[0].Text);
+        Assert.Equal("'id-1'", session.Run("Store.new_id()").Outputs[0].Text.Replace("\"", "'"));
+        Assert.Equal("[1, 2, 3]", session.Run("Store.Numbers()").Outputs[0].Text);
+    }
+
     [Fact]
     public void Initialize_puts_names_in_scope_without_counting_as_a_cell()
     {
@@ -131,11 +154,12 @@ public sealed class HostObjectTests
     {
         using var session = Open(new Scope());
 
-        Assert.Contains("NewId", session.Complete("Store.", 6).Items);
+        Assert.Contains("new_id", session.Complete("Store.", 6).Items);
+        Assert.DoesNotContain("NewId", session.Complete("Store.", 6).Items);
         Assert.DoesNotContain("Internals", session.Complete("Store.", 6).Items);
         Assert.DoesNotContain("GetType", session.Complete("Store.", 6).Items);
-        Assert.Equal(["Echo"], session.Complete("Store.Ec", 8).Items);
-        Assert.Contains("Q", session.Complete("Q", 1).Items);
+        Assert.Equal(["echo"], session.Complete("Store.ec", 8).Items);
+        Assert.Contains("Q", session.Complete("Q", 1).Items);  // module names are the program's own; the host decides them
     }
 
     [Fact]
@@ -146,15 +170,15 @@ public sealed class HostObjectTests
         using var session = Open(scope);
 
         // Q() returns a Query, StartAt returns a Query again, and Label is one of its members.
-        Assert.Contains("StartAt", session.Complete("Q().", 4).Items);
-        Assert.Contains("Label", session.Complete("Q().StartAt('x').", 17).Items);
-        Assert.Equal(["Label"], session.Complete("Q().StartAt('x').Lab", 20).Items);
+        Assert.Contains("start_at", session.Complete("Q().", 4).Items);
+        Assert.Contains("label", session.Complete("Q().StartAt('x').", 17).Items);
+        Assert.Equal(["label"], session.Complete("Q().start_at('x').lab", 22).Items);
 
         // A member that returns a task completes with the awaited type's members.
-        Assert.Contains("NewId", session.Complete("Store.Self().", 13).Items);
+        Assert.Contains("new_id", session.Complete("Store.Self().", 13).Items);
 
         // Properties are followed by their declared type; a Python call is not followed at all.
-        Assert.Contains("Label", session.Complete("Store.Current.", 14).Items);
+        Assert.Contains("label", session.Complete("Store.Current.", 14).Items);
         session.Run("def f():\n    return Store");
         Assert.Empty(session.Complete("f().", 4).Items);
 

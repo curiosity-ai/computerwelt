@@ -6,6 +6,9 @@ internal sealed class Entry(string name)
 {
     public string Name { get; } = name;
 
+    /// <summary>The name as a program is shown it, per the policy's style.</summary>
+    public string Shown { get; set; } = name;
+
     public PropertyInfo? Property { get; set; }
 
     public FieldInfo? Field { get; set; }
@@ -78,12 +81,13 @@ internal sealed class MemberTable
         foreach (var entry in _byName.Values)
         {
             // Fewest parameters first: `Q()` before `Q(userUID)`, and the cheapest binding wins on a tie.
+            entry.Shown = policy.NameStyle == HostNameStyle.Pythonic ? HostNames.ToPython(entry.Name) : entry.Name;
             entry.Methods.Sort(static (a, b) => a.GetParameters().Length.CompareTo(b.GetParameters().Length));
             _byKey[Key(entry.Name)] = entry;
         }
     }
 
-    public IEnumerable<string> Names => _byName.Keys.Order(StringComparer.Ordinal);
+    public IEnumerable<string> Names => _byName.Values.Select(static e => e.Shown).Order(StringComparer.Ordinal);
 
     public Entry? Find(string name) =>
         _byName.TryGetValue(name, out var exact) ? exact : _byKey.GetValueOrDefault(Key(name));
@@ -99,7 +103,7 @@ internal sealed class MemberTable
     }
 
     // `start_at`, `StartAt` and `startat` are the same member.
-    private static string Key(string name) => name.Replace("_", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+    private static string Key(string name) => HostNames.Key(name);
 
     private static bool IsUnsupported(Type type) => typeof(Delegate).IsAssignableFrom(type) || type.IsByRef || type.IsPointer;
 

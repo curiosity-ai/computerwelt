@@ -217,6 +217,10 @@ A `Task` result is awaited by blocking the calling thread — the one blocking w
 cell runs on a thread of its own; a host must not drive a session from a thread with a synchronisation context.
 A cancellation stays an `OperationCanceledException`, so no `except` in the program swallows an interrupt.
 
+Names are Pythonic by default (`HostObjectPolicy.NameStyle`): members are listed, completed and shown in `snake_case`
+(`StartAt` is `start_at`, `AsUIDEnumerable` is `as_uid_enumerable`, a keyword `userUID` is `user_uid`), and the declared
+spelling is still accepted on lookup. `HostNames.ToPython` is the conversion, public so a host's generated modules agree.
+
 Completion reads *declared types*, not values: `HostShape` follows `Q().StartAt('x').` by each method's return type
 (a task's result type looked through) under the same policy, calling nothing; a Python call is still not followed.
 `PythonLibrary.FromSource(name, source, hostNames)` gives a library source host-built names (the object it builds its
