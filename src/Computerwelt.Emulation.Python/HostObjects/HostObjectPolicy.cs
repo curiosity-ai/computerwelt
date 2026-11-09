@@ -24,22 +24,16 @@ public sealed class HostObjectPolicy
 {
     private readonly Func<Type, bool> _exposes;
     private readonly HashSet<string> _hidden;
-    private readonly Func<MemberInfo, bool>? _hideMember;
 
     /// <summary>Creates a policy from a predicate over types.</summary>
     /// <param name="exposes">Whether members declared by a type may be reached.</param>
     /// <param name="hiddenMembers">Member names that are never reachable, on any type — <c>Internals</c>, say.</param>
     /// <param name="textTypes">Value types that cross as text and are read back from text: an id, a path.</param>
-    /// <param name="hideMember">
-    /// Hides individual members by what they are rather than what they are called — one carrying an attribute the host
-    /// uses to mark what a restricted caller must not reach. Consulted for every member, on every type.
-    /// </param>
-    public HostObjectPolicy(Func<Type, bool> exposes, IEnumerable<string>? hiddenMembers = null, Func<Type, bool>? textTypes = null, Func<MemberInfo, bool>? hideMember = null)
+    public HostObjectPolicy(Func<Type, bool> exposes, IEnumerable<string>? hiddenMembers = null, Func<Type, bool>? textTypes = null)
     {
         ArgumentNullException.ThrowIfNull(exposes);
 
         _exposes = exposes;
-        _hideMember = hideMember;
         _hidden = new HashSet<string>(hiddenMembers ?? [], StringComparer.Ordinal);
         IsTextType = textTypes ?? (static _ => false);
     }
@@ -65,7 +59,4 @@ public sealed class HostObjectPolicy
 
     /// <summary>Whether a member name is hidden.</summary>
     public bool IsHidden(string name) => _hidden.Contains(name);
-
-    /// <summary>Whether a member is hidden, by its name or by the host's predicate.</summary>
-    public bool IsHidden(MemberInfo member) => _hidden.Contains(member.Name) || _hideMember?.Invoke(member) == true;
 }
