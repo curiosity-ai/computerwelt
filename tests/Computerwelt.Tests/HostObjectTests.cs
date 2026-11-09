@@ -103,6 +103,24 @@ public sealed class HostObjectTests
     }
 
     [Fact]
+    public void Members_the_host_marks_are_hidden_from_a_restricted_caller_and_from_completion()
+    {
+        var restricted = new HostObjectPolicy(
+            t => t.Assembly == typeof(HostObjectTests).Assembly,
+            hideMember: m => m.IsDefined(typeof(WriteAttribute), inherit: true));
+
+        var library = PythonLibrary.FromSource("host", "Store = _scope.Store\n", _ => new Dictionary<string, PyObject> { ["_scope"] = PyHostObject.Wrap(new Scope(), restricted) });
+        using var session = new PythonOptions { Libraries = [library] }.StartSession(new InMemoryFileSystem(), "/");
+
+        session.Initialize("from host import *");
+
+        Assert.Equal("[1, 2, 3]", session.Run("Store.Numbers()").Outputs[0].Text);
+        Assert.Equal("AttributeError", session.Run("Store.Delete()").ErrorName);
+        Assert.DoesNotContain("Delete", session.Complete("Store.", 6).Items);
+        Assert.Contains("Numbers", session.Complete("Store.", 6).Items);
+    }
+
+    [Fact]
     public void Failures_become_python_exceptions_and_overload_errors_say_what_was_tried()
     {
         using var session = Open(new Scope());
@@ -162,6 +180,9 @@ public sealed class HostObjectTests
     }
 }
 
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class WriteAttribute : Attribute;
+
 public sealed class Ident(string value)
 {
     public string Value { get; } = value;
@@ -196,6 +217,9 @@ public sealed class Store
     public Dictionary<string, int> Map() => new() { ["a"] = 1 };
 
     public object Outsider() => new System.Text.StringBuilder("abc");
+
+    [Write]
+    public int Delete() => 1;
 
     public string Boom() => throw new InvalidOperationException("boom");
 

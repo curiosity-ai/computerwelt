@@ -41,7 +41,7 @@ internal sealed class MemberTable
         const BindingFlags flags = BindingFlags.Public | BindingFlags.Instance;
 
         bool Reachable(MemberInfo member) =>
-            member.DeclaringType is { } owner && policy.Exposes(owner) && !policy.IsHidden(member.Name);
+            member.DeclaringType is { } owner && policy.Exposes(owner) && !policy.IsHidden(member);
 
         // Interface members count too: a value typed as an interface answers what the interface declares.
         var types = new List<Type> { type };
