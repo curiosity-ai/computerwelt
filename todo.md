@@ -197,7 +197,14 @@ MIME bundle — `text/plain` always, plus whatever `_repr_html_` / `_repr_markdo
 `CancellationToken` stops a cell at the next 1024th instruction as `KeyboardInterrupt`; it
 is a host exception, so no `except` in the cell can swallow it. `sys.exit()` ends the cell,
 not the session. Nothing renders: what a host does with HTML a program produced is the host's
-decision. 16 unit tests (`SessionTests`) and 2 joined (`NotebookTests`).
+decision. 16 unit tests (`SessionTests`) and 4 joined (`NotebookTests`).
+
+A host building an editor around a session has two more calls. `Variables()` lists the
+cells' variables (modules and `_`-names left out, repr capped at 80 characters, a repr that
+raises shown as the type). `Complete(source, cursor)` answers names in scope or the
+attributes of a *dotted name* (`math.sq`, `value.up`) by attribute lookup only, so it never
+calls a function the person wrote: `f().up` completes nothing, and a test pins that `f`
+did not run.
 
 ### The language
 
