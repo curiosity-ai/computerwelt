@@ -317,6 +317,10 @@ internal static class Introspection
                 collected.UnionWith(source.AttributeNames);
                 break;
 
+            case HostObjects.IPyAttributeNames host:
+                collected.UnionWith(host.AttributeNames);
+                break;
+
             case PyException exception:
                 collected.UnionWith(["args", "with_traceback", "add_note", "__cause__", "__context__", "__traceback__", "__suppress_context__"]);
 
