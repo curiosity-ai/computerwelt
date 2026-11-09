@@ -29,7 +29,7 @@ namespace Computerwelt.Emulation.Python;
 /// nothing.
 /// </para>
 /// </remarks>
-public sealed class PythonSession : IDisposable
+public sealed partial class PythonSession : IDisposable
 {
     private readonly VirtualMachine _machine;
     private readonly List<CellOutput> _outputs = [];

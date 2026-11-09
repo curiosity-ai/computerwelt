@@ -39,4 +39,41 @@ public sealed class NotebookTests
         Assert.Equal("[0, 1, 4, 9]", notebook.Run("x").Outputs[0].Text);
         Assert.Equal("NameError", notebook.Run("open('/etc/passwd')").ErrorName);
     }
+
+    [Fact]
+    public void Variables_lists_what_the_cells_defined_and_hides_the_session_names()
+    {
+        using var notebook = new PythonRunner().StartSession();
+        notebook.Run("import math\nxs = [1, 2, 3]\nname = 'ada'\n_hidden = 1\n2 + 2");
+
+        var variables = notebook.Variables();
+
+        Assert.Equal(["name", "xs"], variables.Select(v => v.Name));
+        Assert.Equal("list", variables.Single(v => v.Name == "xs").Type);
+        Assert.Equal("[1, 2, 3]", variables.Single(v => v.Name == "xs").Summary);
+    }
+
+    [Fact]
+    public void Complete_offers_names_in_scope_and_attributes_without_calling_anything()
+    {
+        using var notebook = new PythonRunner().StartSession();
+        notebook.Run("import math\ncalls = []\ndef f():\n    calls.append(1)\n    return 'x'\nvalue = 'hello'");
+
+        var scope = notebook.Complete("val", 3);
+        Assert.Contains("value", scope.Items);
+        Assert.Equal(0, scope.Start);
+
+        var module = notebook.Complete("math.sq", 7);
+        Assert.Equal(["sqrt"], module.Items);
+        Assert.Equal(5, module.Start);
+
+        var text = notebook.Complete("value.up", 8);
+        Assert.Contains("upper", text.Items);
+
+        // `f().` needs a call to resolve, which completion never makes.
+        Assert.Empty(notebook.Complete("f().up", 6).Items);
+        Assert.Equal("[]", notebook.Run("calls").Outputs[0].Text);
+
+        Assert.Empty(notebook.Complete("nothing_like_this.x", 19).Items);
+    }
 }
